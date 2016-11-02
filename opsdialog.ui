@@ -7,13 +7,13 @@
     <x>0</x>
     <y>0</y>
     <width>522</width>
-    <height>323</height>
+    <height>499</height>
    </rect>
   </property>
   <property name="windowTitle">
    <string>New Operation</string>
   </property>
-  <layout class="QVBoxLayout" name="verticalLayout">
+  <layout class="QVBoxLayout" name="verticalLayout_3">
    <item>
     <widget class="QGroupBox" name="groupBox">
      <property name="title">
@@ -30,24 +30,7 @@
       <item row="0" column="1">
        <layout class="QHBoxLayout" name="horizontalLayout_3">
         <item>
-         <widget class="QRadioButton" name="selectAmazon">
-          <property name="text">
-           <string>Amazon:</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QComboBox" name="amazonBox"/>
-        </item>
-        <item>
-         <widget class="QRadioButton" name="selectVendor">
-          <property name="text">
-           <string>Vendor:</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QComboBox" name="vendorBox"/>
+         <widget class="QComboBox" name="sourceBox"/>
         </item>
        </layout>
       </item>
@@ -181,22 +164,37 @@
      <property name="title">
       <string>Operation:</string>
      </property>
-     <layout class="QGridLayout" name="gridLayout_2">
-      <item row="0" column="0">
-       <widget class="QLabel" name="label_2">
-        <property name="sizePolicy">
-         <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
-          <horstretch>0</horstretch>
-          <verstretch>0</verstretch>
-         </sizepolicy>
-        </property>
-        <property name="text">
-         <string>Operation:</string>
-        </property>
-       </widget>
+     <layout class="QVBoxLayout" name="verticalLayout_2">
+      <item>
+       <layout class="QFormLayout" name="formLayout_2">
+        <item row="0" column="0">
+         <widget class="QLabel" name="label_2">
+          <property name="sizePolicy">
+           <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
+            <horstretch>0</horstretch>
+            <verstretch>0</verstretch>
+           </sizepolicy>
+          </property>
+          <property name="text">
+           <string>Operation:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QComboBox" name="opsBox"/>
+        </item>
+       </layout>
       </item>
-      <item row="0" column="1">
-       <widget class="QComboBox" name="opsBox"/>
+      <item>
+       <widget class="QStackedWidget" name="paramsStack">
+        <property name="currentIndex">
+         <number>1</number>
+        </property>
+        <widget class="QWidget" name="ListMatchingProducts">
+         <layout class="QVBoxLayout" name="verticalLayout"/>
+        </widget>
+        <widget class="QWidget" name="page_2"/>
+       </widget>
       </item>
      </layout>
     </widget>
@@ -213,16 +211,8 @@
    </item>
   </layout>
   <zorder>buttonBox</zorder>
-  <zorder>amazonBox</zorder>
-  <zorder>vendorBox</zorder>
-  <zorder>selectAmazon</zorder>
-  <zorder>selectVendor</zorder>
-  <zorder>priceFromBox</zorder>
-  <zorder>priceToLabel</zorder>
-  <zorder>priceToBox</zorder>
   <zorder>groupBox</zorder>
   <zorder>groupBox_2</zorder>
-  <zorder>priceFromBox</zorder>
   <zorder>groupBox_3</zorder>
  </widget>
  <resources/>

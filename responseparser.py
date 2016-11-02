@@ -5,13 +5,6 @@ from lxml import etree
 class ParseError(Exception):
     pass
 
-class AmazonError(Exception):
-
-    def __init__(self, msg, type, code):
-        super(AmazonError, self).__init__(msg)
-        self.type = type
-        self.code = code
-
 
 class MWSResponseParser:
 
@@ -19,73 +12,72 @@ class MWSResponseParser:
     re_ns_open = re.compile(r'<\w+:')
     re_ns_close = re.compile(r'/\w+:')
 
-    def __init__(self, xml=None):
-        if xml:
+    def __init__(self, xml):
+        try:
             self.tree = etree.fromstring(self._remove_namespace(xml))
-            self.error_test()
-        else:
-            self.tree = None
+        except Exception as e:
+            raise ParseError(repr(e))
 
     def _remove_namespace(self, xml):
         """Remove all traces of namespaces from an XML string."""
-        response = self.re_ns_decl.sub('', xml)     # Remove namespace declarations
+        response = self.re_ns_decl.sub('', xml)          # Remove namespace declarations
         response = self.re_ns_open.sub('<', response)    # Remove namespaces in opening tags
         response = self.re_ns_close.sub('/', response)   # Remove namespaces in closing tags
         return response
 
-    def _xpath_get(self, root, path, dtype=str, default=None):
+    def _xpath_get(self, path, root=None, dtype=str, default=None):
         """Use XPath to get values under a root node, including type casting and a default value."""
+        root = root if root is not None else self.tree
         items = root.xpath(path)
         try:
             return dtype(items[0].text)
         except (TypeError, IndexError):
             return default
 
-    def error_test(self):
-        """Test if the response is valid, or is an ErrorResponse"""
-        if self.tree is None:
-            raise ParseError('No XML has been provided.')
 
-        if self.tree.tag == 'ErrorResponse':
-            msg = self._xpath_get(self.tree, './Error/Message')
-            type_ = self._xpath_get(self.tree, './Error/Type')
-            code = self._xpath_get(self.tree, './Error/Code')
-            raise AmazonError(msg, type_, code)
+class ErrorResponseParser(MWSResponseParser):
 
-    def parse(self, xml):
-        self.tree = etree.fromstring(self._remove_namespace(xml))
-        self.error_test()
+    @property
+    def type(self):
+        return self._xpath_get('.//Error/Type')
+
+    @property
+    def code(self):
+        return self._xpath_get('.//Error/Code')
+
+    @property
+    def message(self):
+        return self._xpath_get('.//Error/Message')
 
 
 class ListMatchingProductsParser(MWSResponseParser):
 
     def get_products(self):
-        if self.tree is None:
-            raise ParseError('No XML has been provided.')
 
         for tag in self.tree.iterdescendants('Product'):
             product = {}
 
-            product['asin'] = self._xpath_get(tag, './/MarketplaceASIN/ASIN')
+            product['asin'] = self._xpath_get('.//MarketplaceASIN/ASIN', tag)
 
-            product['brand'] = self._xpath_get(tag, './/Brand') \
-                               or self._xpath_get(tag, './/Manufacturer') \
-                               or self._xpath_get(tag, './/Label')
+            product['brand'] = self._xpath_get('.//Brand', tag) \
+                               or self._xpath_get('.//Manufacturer', tag) \
+                               or self._xpath_get('.//Label', tag)
 
-            product['model'] = self._xpath_get(tag, './/Model') \
-                               or self._xpath_get(tag, './/PartNumber')
+            product['model'] = self._xpath_get('.//Model', tag) \
+                               or self._xpath_get('.//PartNumber', tag)
 
             # I don't know if UPC is provided by ListMatchingProducts...
-            product['upc'] = self._xpath_get(tag, './/UPC')
+            product['upc'] = self._xpath_get('.//UPC', tag)
 
-            product['title'] = self._xpath_get(tag, './/Title')
+            product['title'] = self._xpath_get('.//Title', tag)
 
             # TODO: Implement a more robust/accurate way to get category and sales rank
-            product['productgroup'] = self._xpath_get(tag, './/ProductGroup')
-            product['salesrank'] = self._xpath_get(tag, './/SalesRank/Rank', int)
+            product['productcategoryid'] = self._xpath_get('.//ProductCategoryId', tag)
+            product['salesrank'] = self._xpath_get('.//SalesRank/Rank', tag, int)
 
-            product['numberofitems'] = self._xpath_get(tag, './/NumberOfItems', int)
-            product['packagequantity'] = self._xpath_get(tag, './/PackageQuantity', int)
+            product['quantity'] = max(self._xpath_get('.//NumberOfItems', tag, int, default=0),
+                                      self._xpath_get('.//PackageQuantity', tag, int, default=0),
+                                      1)
 
             features = []
             for feature in tag.iterdescendants('Feature'):
@@ -93,6 +85,64 @@ class ListMatchingProductsParser(MWSResponseParser):
             product['features'] = '\n'.join(features)
 
             yield product
+
+
+class GetCompetitivePricingForASINParser(MWSResponseParser):
+
+    def get_product_info(self):
+
+        for tag in self.tree.iterdescendants('Product'):
+            product = {}
+            product['asin'] = self._xpath_get('.//ASIN', tag)
+
+            for comp_price in tag.iterdescendants('CompetitivePrice'):
+                if comp_price.attrib['condition'] == 'New':
+                    product['landed'] = self._xpath_get('.//LandedPrice/Amount', tag, float)
+                    product['listing'] = self._xpath_get('.//ListingPrice/Amount', tag, float)
+                    product['price'] = product['landed'] or product['listing']
+            else:
+                product['landed'] = product.get('landed', None)
+                product['listing'] = product.get('listing', None)
+                product['price'] = product.get('price', None)
+
+            product['productcategoryid'] = self._xpath_get('.//SalesRank/ProductCategoryId')
+            product['salesrank'] = self._xpath_get('.//SalesRank/Rank', tag, int)
+
+            for count in tag.iterdescendants('OfferListingCount'):
+                if count.attrib['condition'] == 'New':
+                    product['newlistings'] = int(count.text)
+
+            yield product
+
+
+class GetLowestOfferListingsForAsinParser(MWSResponseParser):
+
+    def get_prices(self):
+
+        for tag in self.tree.iterdescendants('Product'):
+            prices = {}
+            prices['asin'] = self._xpath_get('.//MarketplaceASIN/ASIN', tag)
+            prices['landed'] = self._xpath_get('.//LandedPrice/Amount', tag, float)
+            prices['listing'] = self._xpath_get('.//ListingPrice/Amount', tag, float)
+            prices['price'] = prices['landed'] or prices['listing']
+
+            yield prices
+
+
+class GetMyFeesEstimateParser(MWSResponseParser):
+
+    def get_fees(self):
+
+        for tag in self.tree.iterdescendants('FeesEstimateResult'):
+            result = {}
+            result['status'] = self._xpath_get('.//Status', tag)
+            result['asin'] = self._xpath_get('.//IdValue', tag)
+            result['amount'] = self._xpath_get('.//TotalFeesEstimate/Amount', tag, float)
+            result['errortype'] = self._xpath_get('.//Error/Type', tag)
+            result['errorcode'] = self._xpath_get('.//Error/Code', tag)
+            result['errormessage'] = self._xpath_get('.//Error/Message', tag)
+
+            yield result
 
 
 testxml = """<ListMatchingProductsResponse xmlns="http://mws.amazonservices.com/schema/Products/2011-10-01">
@@ -280,3 +330,160 @@ testxml = """<ListMatchingProductsResponse xmlns="http://mws.amazonservices.com/
   </ResponseMetadata>
 </ListMatchingProductsResponse>
 """
+
+throttled_xml = """<?xml version="1.0"?>
+<ErrorResponse xmlns="http://mws.amazonservices.com/schema/Products/2011-10-01">
+  <Error>
+    <Type>
+</Type>
+    <Code>RequestThrottled</Code>
+    <Message>Request is throttled</Message>
+  </Error>
+  <RequestID>b4cfc711-1a54-4df7-904b-af38b4644638</RequestID>
+</ErrorResponse>"""
+
+getcompetitivexml = """<?xml version="1.0"?>
+<GetCompetitivePricingForASINResponse xmlns="http://mws.amazonservices.com/schema/Products/2011-10-01">
+<GetCompetitivePricingForASINResult ASIN="B013YTG2VY" status="Success">
+  <Product xmlns="http://mws.amazonservices.com/schema/Products/2011-10-01" xmlns:ns2="http://mws.amazonservices.com/schema/Products/2011-10-01/default.xsd">
+    <Identifiers>
+      <MarketplaceASIN>
+        <MarketplaceId>ATVPDKIKX0DER</MarketplaceId>
+        <ASIN>B013YTG2VY</ASIN>
+      </MarketplaceASIN>
+    </Identifiers>
+    <CompetitivePricing>
+      <CompetitivePrices>
+        <CompetitivePrice belongsToRequester="false" condition="New" subcondition="New">
+          <CompetitivePriceId>1</CompetitivePriceId>
+          <Price>
+            <LandedPrice>
+              <CurrencyCode>USD</CurrencyCode>
+              <Amount>32.99</Amount>
+            </LandedPrice>
+            <ListingPrice>
+              <CurrencyCode>USD</CurrencyCode>
+              <Amount>32.99</Amount>
+            </ListingPrice>
+            <Shipping>
+              <CurrencyCode>USD</CurrencyCode>
+              <Amount>0.00</Amount>
+            </Shipping>
+          </Price>
+        </CompetitivePrice>
+      </CompetitivePrices>
+      <NumberOfOfferListings>
+        <OfferListingCount condition="New">3</OfferListingCount>
+        <OfferListingCount condition="Any">3</OfferListingCount>
+      </NumberOfOfferListings>
+    </CompetitivePricing>
+    <SalesRankings>
+      <SalesRank>
+        <ProductCategoryId>home_improvement_display_on_website</ProductCategoryId>
+        <Rank>20325</Rank>
+      </SalesRank>
+      <SalesRank>
+        <ProductCategoryId>2314207011</ProductCategoryId>
+        <Rank>899</Rank>
+      </SalesRank>
+    </SalesRankings>
+  </Product>
+</GetCompetitivePricingForASINResult>
+<GetCompetitivePricingForASINResult ASIN="B004ZH4GKE" status="Success">
+  <Product xmlns="http://mws.amazonservices.com/schema/Products/2011-10-01" xmlns:ns2="http://mws.amazonservices.com/schema/Products/2011-10-01/default.xsd">
+    <Identifiers>
+      <MarketplaceASIN>
+        <MarketplaceId>ATVPDKIKX0DER</MarketplaceId>
+        <ASIN>B004ZH4GKE</ASIN>
+      </MarketplaceASIN>
+    </Identifiers>
+    <CompetitivePricing>
+      <CompetitivePrices>
+        <CompetitivePrice belongsToRequester="true" condition="New" subcondition="New">
+          <CompetitivePriceId>1</CompetitivePriceId>
+          <Price>
+            <LandedPrice>
+              <CurrencyCode>USD</CurrencyCode>
+              <Amount>32.99</Amount>
+            </LandedPrice>
+            <ListingPrice>
+              <CurrencyCode>USD</CurrencyCode>
+              <Amount>32.99</Amount>
+            </ListingPrice>
+            <Shipping>
+              <CurrencyCode>USD</CurrencyCode>
+              <Amount>0.00</Amount>
+            </Shipping>
+          </Price>
+        </CompetitivePrice>
+      </CompetitivePrices>
+      <NumberOfOfferListings>
+        <OfferListingCount condition="New">2</OfferListingCount>
+        <OfferListingCount condition="Any">2</OfferListingCount>
+      </NumberOfOfferListings>
+    </CompetitivePricing>
+    <SalesRankings>
+      <SalesRank>
+        <ProductCategoryId>biss_basic_display_on_website</ProductCategoryId>
+        <Rank>2697</Rank>
+      </SalesRank>
+      <SalesRank>
+        <ProductCategoryId>7491822011</ProductCategoryId>
+        <Rank>20</Rank>
+      </SalesRank>
+      <SalesRank>
+        <ProductCategoryId>7491820011</ProductCategoryId>
+        <Rank>23</Rank>
+      </SalesRank>
+      <SalesRank>
+        <ProductCategoryId>393303011</ProductCategoryId>
+        <Rank>88</Rank>
+      </SalesRank>
+    </SalesRankings>
+  </Product>
+</GetCompetitivePricingForASINResult>
+<GetCompetitivePricingForASINResult ASIN="GKJDLKJ30984" status="ClientError">
+  <Error>
+    <Type>Sender</Type>
+    <Code>InvalidParameterValue</Code>
+    <Message>ASIN GKJDLKJ30984 is not valid for marketplace ATVPDKIKX0DER</Message>
+  </Error>
+</GetCompetitivePricingForASINResult>
+<ResponseMetadata>
+  <RequestId>1079189b-f4ff-4d72-9bc5-f4c0d696e30b</RequestId>
+</ResponseMetadata>
+</GetCompetitivePricingForASINResponse>"""
+
+xml3 = """<?xml version="1.0"?>
+<GetCompetitivePricingForASINResponse xmlns="http://mws.amazonservices.com/schema/Products/2011-10-01">
+<GetCompetitivePricingForASINResult ASIN="B001V9LQLG" status="Success">
+  <Product xmlns="http://mws.amazonservices.com/schema/Products/2011-10-01" xmlns:ns2="http://mws.amazonservices.com/schema/Products/2011-10-01/default.xsd">
+    <Identifiers>
+      <MarketplaceASIN>
+        <MarketplaceId>ATVPDKIKX0DER</MarketplaceId>
+        <ASIN>B001V9LQLG</ASIN>
+      </MarketplaceASIN>
+    </Identifiers>
+    <CompetitivePricing>
+      <CompetitivePrices/>
+      <NumberOfOfferListings>
+        <OfferListingCount condition="New">1</OfferListingCount>
+        <OfferListingCount condition="Any">1</OfferListingCount>
+      </NumberOfOfferListings>
+    </CompetitivePricing>
+    <SalesRankings>
+      <SalesRank>
+        <ProductCategoryId>office_product_display_on_website</ProductCategoryId>
+        <Rank>80307</Rank>
+      </SalesRank>
+      <SalesRank>
+        <ProductCategoryId>8090706011</ProductCategoryId>
+        <Rank>569</Rank>
+      </SalesRank>
+    </SalesRankings>
+  </Product>
+</GetCompetitivePricingForASINResult>
+<ResponseMetadata>
+  <RequestId>97fcb77a-9c70-4379-baab-ce47b719f26f</RequestId>
+</ResponseMetadata>
+</GetCompetitivePricingForASINResponse>"""

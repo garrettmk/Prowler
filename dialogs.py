@@ -1,13 +1,17 @@
-import arrow
 import csv
+from collections import OrderedDict
+from itertools import chain
 
+import arrow
 from PyQt5.QtCore import QDateTime
 from PyQt5.QtWidgets import QDialog, QFileDialog, QDialogButtonBox
-
+from PyQt5.QtWidgets import QWidget
+from database import *
+from selectlist_ui import Ui_selectListDialog
 from importcsv_ui import Ui_ImportCSV
-from progressdialog_ui import Ui_progressDialog
+from listmatchingproducts_params_ui import Ui_listMatchingProductsParams
 from opsdialog_ui import Ui_opsDialog
-
+from progressdialog_ui import Ui_progressDialog
 
 class ImportCSVDialog(QDialog, Ui_ImportCSV):
 
@@ -15,10 +19,20 @@ class ImportCSVDialog(QDialog, Ui_ImportCSV):
         super(ImportCSVDialog, self).__init__(parent=parent)
         self.setupUi(self)
 
-        self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(False)
-        self.fileButton.clicked.connect(self.open_file)
-
         self.vendorBox.addItems(vendors)
+        self.okbutton = self.buttonBox.button(QDialogButtonBox.Ok)
+
+        self.fileButton.clicked.connect(self.open_file)
+        self.vendorBox.currentTextChanged.connect(self.maybe_enable_ok)
+
+        self.okbutton.setEnabled(False)
+        self.file_is_ok = False
+
+    def maybe_enable_ok(self):
+        if self.file_is_ok and self.vendorBox.currentText():
+            self.okbutton.setEnabled(True)
+        else:
+            self.okbutton.setEnabled(False)
 
     def open_file(self):
         filename, ftype = QFileDialog.getOpenFileName(self, caption='Open CSV', filter='CSV Files (*.csv)')
@@ -35,7 +49,8 @@ class ImportCSVDialog(QDialog, Ui_ImportCSV):
             for field in req_fields:
                 if field not in reader.fieldnames:
                     self.statusLabel.setText('File does not contain all required fields: ' + ', '.join(req_fields))
-                    self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(False)
+                    self.okbutton.setEnabled(False)
+                    self.file_is_ok = False
                     return
 
             # Count the rows. Also scan for errors
@@ -43,14 +58,16 @@ class ImportCSVDialog(QDialog, Ui_ImportCSV):
                 rows = sum(1 for row in reader)
             except Exception as e:
                 self.statusLabel.setText('Error: ' + str(e))
-                self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(False)
+                self.okbutton.setEnabled(False)
+                self.file_is_ok = False
                 return
 
             self.startBox.setValue(0)
             self.endBox.setValue(rows)
 
         self.statusLabel.setText('')
-        self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(True)
+        self.file_is_ok = True
+        self.maybe_enable_ok()
 
     @property
     def filename(self):
@@ -113,23 +130,65 @@ class ProgressDialog(QDialog, Ui_progressDialog):
         self.progressBar.setValue(value)
 
 
+class ListMatchingProductsParameters(QWidget, Ui_listMatchingProductsParams):
+
+    def __init__(self, parent=None):
+        super(ListMatchingProductsParameters, self).__init__(parent=parent)
+        self.setupUi(self)
+
+    @property
+    def params(self):
+        params = {}
+
+        params['linkif'] = {'conf': self.confidenceBox.value()}
+        params['priceif'] = {'salesrank': self.salesRankBox.value()}
+        params['feesif'] = {'priceratio': '%.2f' % (self.differenceBox.value() / 100)}
+
+        return params
+
+
 class OperationDialog(QDialog, Ui_opsDialog):
 
-    def __init__(self, amz_sources=[], vnd_sources=[], amz_ops=[], vnd_ops=[], parent=None):
+    def __init__(self, parent=None):
         super(OperationDialog, self).__init__(parent=parent)
         self.setupUi(self)
 
-        self.amz_ops = amz_ops
-        self.vnd_ops = vnd_ops
+        self.dbsession = Session()
+
+        # Set up the operations list and parameter widgets
+        self.amz_ops = OrderedDict()
+        self.amz_ops['GetLowestOfferListingsForASIN'] = QWidget()
+        self.amz_ops['GetMyFeesEstimate'] = QWidget()
+
+        self.vnd_ops = OrderedDict()
+        self.vnd_ops['ListMatchingProducts'] = ListMatchingProductsParameters()
+
+        for key, widget in chain(self.amz_ops.items(), self.vnd_ops.items()):
+            self.paramsStack.addWidget(widget)
+
+        # Populate the source combo box
+        self.amz_srcs = []
+        self.vnd_srcs = []
+
+        for result in self.dbsession.query(List).all():
+            if result.is_amazon:
+                self.amz_srcs.append(result.name)
+            else:
+                self.vnd_srcs.append(result.name)
+
+        self.vnd_srcs.extend([result.name for result in self.dbsession.query(Vendor.name).\
+                                                                       filter(Vendor.id != 0).\
+                                                                       all()])
+        self.amz_srcs.insert(0, 'All Amazon products')
+        self.vnd_srcs.insert(0, 'All Vendor products')
 
         # Populate the combo boxes
-        self.amazonBox.addItems(amz_sources)
-        self.vendorBox.addItems(vnd_sources)
+        self.sourceBox.addItems(self.amz_srcs)
+        self.sourceBox.addItems(self.vnd_srcs)
 
         # UI connections
-        self.selectAmazon.toggled.connect(self.amazonBox.setEnabled)
-        self.selectVendor.toggled.connect(self.vendorBox.setEnabled)
-        self.selectAmazon.toggled.connect(self.populate_ops_box)
+        self.sourceBox.currentIndexChanged.connect(self.populate_ops_box)
+        self.opsBox.currentTextChanged.connect(self.show_parameters)
 
         self.priceCheck.toggled.connect(self.priceFromBox.setEnabled)
         self.priceCheck.toggled.connect(self.priceToBox.setEnabled)
@@ -138,24 +197,25 @@ class OperationDialog(QDialog, Ui_opsDialog):
         self.lastUpdateCheck.toggled.connect(self.dateTimeEdit.setEnabled)
 
         # Set the initial state
-        self.selectAmazon.setChecked(True)
-        self.vendorBox.setEnabled(False)
         self.populate_ops_box()
         self.dateTimeEdit.setDateTime(QDateTime.currentDateTime())
 
     def populate_ops_box(self):
         self.opsBox.clear()
-        if self.selectAmazon.isChecked():
-            self.opsBox.addItems(self.amz_ops)
+        if self.sourceBox.currentIndex() < len(self.amz_srcs):
+            self.opsBox.addItems(self.amz_ops.keys())
         else:
-            self.opsBox.addItems(self.vnd_ops)
+            self.opsBox.addItems(self.vnd_ops.keys())
+
+    def show_parameters(self, op_name):
+        if op_name in self.amz_ops:
+            self.paramsStack.setCurrentWidget(self.amz_ops[op_name])
+        elif op_name in self.vnd_ops:
+            self.paramsStack.setCurrentWidget(self.vnd_ops[op_name])
 
     @property
     def source(self):
-        if self.selectAmazon.isChecked():
-            return 'Amazon', self.amazonBox.currentText()
-        else:
-            return 'Vendor', self.vendorBox.currentText()
+        return self.sourceBox.currentText()
 
     @property
     def no_linked_products(self):
@@ -184,4 +244,30 @@ class OperationDialog(QDialog, Ui_opsDialog):
 
     @property
     def operation(self):
-        return self.opsBox.currentText()
+        op_name = self.opsBox.currentText()
+        return op_name
+
+    @property
+    def params(self):
+        # Get the current parameter widget
+        param_widget = self.paramsStack.currentWidget()
+        try:
+            params = param_widget.params
+        except AttributeError:
+            params = {}
+
+        return params
+
+
+class SelectListDialog(QDialog, Ui_selectListDialog):
+
+    def __init__(self, list_names=None, parent=None):
+        super(SelectListDialog, self).__init__(parent=parent)
+        self.setupUi(self)
+
+        if list_names:
+            self.listNameBox.addItems(list_names)
+
+    @property
+    def list_name(self):
+        return self.listNameBox.currentText()

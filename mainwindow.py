@@ -1,15 +1,13 @@
-import amazonmws, mwskeys
-import arrow
-
-from PyQt5.QtWidgets import QMainWindow, QTabWidget, QAction
 from PyQt5.QtSql import QSqlDatabase
+from PyQt5.QtWidgets import QMainWindow, QTabWidget
 
 from database import *
-from operations import OperationsManager
 
 from mainwindow_ui import Ui_MainWindow
-from views import AmazonView, VendorView, OperationsView
-from dialogs import OperationDialog
+from operations import OperationsManager
+from amazonview import AmazonView
+from vendorview import VendorView
+from operationsview import OperationsView
 
 
 class MainWindow(QMainWindow, Ui_MainWindow):
@@ -34,8 +32,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         Base.metadata.create_all(self.dbengine)
 
+        amazon = Vendor(id=0, name='Amazon', url='www.amazon.com')
+        self.dbsession.add(self.dbsession.merge(amazon))
+        self.dbsession.commit()
+
         # Set up the operations manager
-        self.opsman = OperationsManager(self)
+        self.opsman = OperationsManager.get_instance(self)
 
         # Set up the toolbar
         self.toolBar.addAction(self.actionOpen_Amazon_view)
@@ -54,26 +56,35 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def open_amazon(self):
         view = AmazonView(self)
-        self.tabs.addTab(view, 'Amazon')
+        idx = self.tabs.addTab(view, 'Amazon')
+        self.tabs.setCurrentIndex(idx)
 
     def open_vendor(self):
         view = VendorView(self)
-        self.tabs.addTab(view, 'Sources')
+        idx = self.tabs.addTab(view, 'Sources')
+        self.tabs.setCurrentIndex(idx)
 
     def open_operations(self):
+        # We only want one operations view open at a time
+        for i in range(self.tabs.count()):
+            if isinstance(self.tabs.widget(i), OperationsView):
+                self.tabs.setCurrentIndex(i)
+                return
+
         view = OperationsView(self)
-        self.tabs.addTab(view, 'Operations')
+        idx = self.tabs.addTab(view, 'Operations')
+        self.tabs.setCurrentIndex(idx)
 
     def close_tab(self, index):
         self.tabs.removeTab(index)
 
     def tab_changed(self, index):
         if self.current_tab:
-            for action in self.current_tab.toolbuttons:
+            for action in self.current_tab.tool_buttons:
                 self.toolBar.removeAction(action)
 
         self.current_tab = self.tabs.currentWidget()
 
         if self.current_tab:
-            for action in self.current_tab.toolbuttons:
+            for action in self.current_tab.tool_buttons:
                 self.toolBar.addAction(action)

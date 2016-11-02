@@ -45,7 +45,7 @@
   <action name="actionOpen_Amazon_view">
    <property name="icon">
     <iconset>
-     <normalon>resources/Amazon-icon.png</normalon>
+     <normalon>icons/Amazon-icon.png</normalon>
     </iconset>
    </property>
    <property name="text">
@@ -58,7 +58,7 @@
   <action name="actionOpen_Vendor_view">
    <property name="icon">
     <iconset>
-     <normalon>148705-essential-collection/png/list-1.png</normalon>
+     <normalon>icons/folder.png</normalon>
     </iconset>
    </property>
    <property name="text">
@@ -71,8 +71,8 @@
   <action name="actionOpen_Operations_view">
    <property name="icon">
     <iconset>
-     <normalon>148705-essential-collection/png/settings-2.png</normalon>
-    </iconset>
+     <normaloff>icons/settings-2.png</normaloff>
+     <normalon>icons/settings-2.png</normalon>icons/settings-2.png</iconset>
    </property>
    <property name="text">
     <string>Open Operations view...</string>
