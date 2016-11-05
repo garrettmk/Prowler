@@ -3,13 +3,16 @@ import requests
 import amazonmws as mws
 import mwskeys, pakeys
 
+from itertools import chain
 from fuzzywuzzy import fuzz
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 
-from responseparser import ListMatchingProductsParser, ErrorResponseParser, GetLowestOfferListingsForAsinParser
-from responseparser import GetMyFeesEstimateParser, GetCompetitivePricingForASINParser
+from responseparser import ListMatchingProductsParser, ErrorResponseParser, GetLowestOfferListingsForASINParser
+from responseparser import GetMyFeesEstimateParser, GetCompetitivePricingForASINParser, ItemLookupParser
 from responseparser import ParseError
+
 from database import *
+from sqlalchemy.event import listen
 
 
 def remove_symbols(string, repl=''):
@@ -61,10 +64,7 @@ class OperationsManager(QObject):
             cls.__instance__ = OperationsManager(parent=parent)
         return cls.__instance__
 
-    supported_mws = ['ListMatchingProducts', 'GetLowestOfferListingsForASIN', 'GetCompetitivePricingForASIN',
-                     'GetMyFeesEstimate']
-    supported_pa = ['ItemLookup']
-    supported_ops = supported_mws + supported_pa + ['AddToProductHistory']
+    supported_ops = ['FindAmazonMatches', 'GetMyFeesEstimate', 'ItemLookup', 'UpdateAndLog']
 
     operation_complete = pyqtSignal(int)
     status_message = pyqtSignal(str)
@@ -73,78 +73,123 @@ class OperationsManager(QObject):
         super(OperationsManager, self).__init__(parent=parent)
         self.dbsession = Session()
         self.scheduled = {}
+        self.processing = False
+        self.running = True
+
+        listen(self.dbsession, 'before_commit', self._before_commit_listener)
 
         # Set up the Amazon api's and throttling managers
-        self.mwsapi = mws.Throttler(mws.Products(mwskeys.accesskey, mwskeys.secretkey, mwskeys.sellerid), blocking=True)
-        self.mwsapi.api.make_request = self.make_request
+        self.mwsapi = mws.Throttler(mws.Products(mwskeys.accesskey, mwskeys.secretkey, mwskeys.sellerid),
+                                    limits=mws.PRODUCTS_LIMITS,
+                                    blocking=True)
+        self.paapi = mws.Throttler(mws.ProductAdvertising(pakeys.accesskey, pakeys.secretkey, pakeys.associatetag),
+                                   limits=mws.PRODUCT_ADVTERTISING_LIMITS,
+                                   blocking=True)
 
-        self.paapi = mws.Throttler(mws.ProductAdvertising(pakeys.accesskey, pakeys.secretkey, pakeys.associatetag), blocking=True)
+        self.mwsapi.api.make_request = self.make_request
         self.paapi.api.make_request = self.make_request
 
-        for operation in self.supported_mws:
-            self.mwsapi.set_priority_quota(operation, priority=0, quota=mws.LIMITS[operation].quota_max - 2)
+        # Set the priority limits
+        for operation in self.mwsapi.limits:
+            self.mwsapi.set_priority_quota(operation, priority=0, quota=self.mwsapi.limits[operation].quota_max - 2)
             self.mwsapi.set_priority_quota(operation, priority=10, quota=2)
+
+    def _before_commit_listener(self, session):
+        """Checks if any Operations have been added/modified in the session. If so, calls load_next()."""
+        for item in chain(session.new, session.dirty, session.deleted):
+            if isinstance(item, Operation):
+                break
+        else:
+            return
+
+        if self.running:
+            self.load_next()
 
     def start(self):
         """Starts processing operations in the database."""
         self.status_message.emit('Begin processing operations...')
+        self.running = True
         self.load_next()
 
     def stop(self):
         """Remove all pending operations from the queue."""
         self.status_message.emit('Stopping all operations.')
+        self.running = False
+
         for t_id in self.scheduled:
             self.killTimer(t_id)
-
         self.scheduled.clear()
 
     def load_next(self):
         """Load and schedule the next operation of each type listed in self.supported_ops."""
+        if not self.running:
+            return
+
         for op_name in self.supported_ops:
-            # Sort first by priority, then by scheduled time, then by id
-            next_op = self.dbsession.query(Operation). \
-                                     filter(Operation.complete == False). \
-                                     filter(Operation.error == False). \
-                                     filter(Operation.current_operation.like('{}%'.format(op_name))). \
-                                     order_by(Operation.priority.desc()). \
-                                     order_by(Operation.scheduled). \
-                                     order_by(Operation.id). \
-                                     first()
+            eligible_ops = self.dbsession.query(Operation).\
+                                          filter(Operation.complete == False).\
+                                          filter(Operation.error == False).\
+                                          filter(Operation.operation.like('%s%%' % op_name))
 
+            # Get the highest-priority event older than the current time
+            next_op = eligible_ops.filter(Operation.scheduled <= func.now()).\
+                                   order_by(Operation.priority.desc()).\
+                                   order_by(Operation.scheduled).\
+                                   first()
+
+            # If nothing is overdue, schedule event with the nearest scheduled time
             if next_op is None:
-                continue
+                next_op = eligible_ops.order_by(Operation.scheduled).\
+                                       order_by(Operation.priority.desc()).\
+                                       first()
 
-            # We only want one operation of a given type scheduled at a time, so bump the currently scheduled op
-            # if it's priority is lower. If there is already a scheduled operation of this type, return
-            already_sched = None
-            for t_id, s_op in self.scheduled.items():
-                if s_op.operation_name == op_name:
-                    already_sched = s_op
-                    break
+                # If no more ops of this type, skip to the next one
+                if next_op is None:
+                    continue
 
-            if already_sched and already_sched.priority < next_op.priority:
-                self.killTimer(t_id)
-                self.scheduled.pop(t_id)
-                self.schedule_op(next_op)
-            elif already_sched:
-                continue
-            else:
-                self.schedule_op(next_op)
+            # Make sure only one operation of this type is scheduled at a time
+            for timer_id, sched_op in {k:v for k, v in self.scheduled.items()}.items():
+                if sched_op.operation_name == next_op.operation_name:
+                    self.killTimer(timer_id)
+                    self.scheduled.pop(timer_id)
 
-    def get_wait(self, api_call, priority):
-        return max(self.mwsapi.request_wait(api_call, priority), self.paapi.request_wait(api_call, priority))
+            self.schedule_op(next_op)
 
     def schedule_op(self, op, wait=None):
-        # Get next available time from the throttler
+        """Get the required wait and set a timer for the given operation."""
         if wait is None:
-            wait = self.get_wait(op.operation_name, op.priority)
+            # Get next available time from the throttler
+            throttled_wait = self.get_wait(op.operation_name, op.priority)
+
+            delta = op.scheduled - arrow.utcnow().naive
+            scheduled_wait = delta.total_seconds()
+
+            wait = max(throttled_wait, scheduled_wait, 0)
 
         # Schedule the timer
         timer_id = self.startTimer(wait * 1000 * 1.1)
         self.scheduled[timer_id] = op
 
+    def get_wait(self, operation, priority):
+        """Return the wait time, in seconds, before the given api_call can be executed."""
+        if operation == 'FindAmazonMatches':
+            return self.mwsapi.request_wait('ListMatchingProducts', priority)
+
+        elif operation == 'ItemLookup':
+            return self.paapi.request_wait('ItemLookup', priority)
+
+        elif operation == 'GetMyFeesEstimate':
+            return self.mwsapi.request_wait('GetMyFeesEstimate', priority)
+
+        else:
+            return max(self.mwsapi.request_wait(operation, priority), self.paapi.request_wait(operation, priority))
+
     def timerEvent(self, event):
         """Do the operation scheduled by the given timer."""
+        if self.processing:
+            event.ignore()
+            return
+
         # Kill the timer and get the associated operation
         timer_id = event.timerId()
         self.killTimer(timer_id)
@@ -155,12 +200,6 @@ class OperationsManager(QObject):
             op.id
         except ObjectDeletedError:
             self.load_next()
-            return
-
-        # Reschedule the op if necessary
-        wait = self.get_wait(op.operation_name, op.priority)
-        if wait:
-            self.schedule_op(op, wait)
             return
 
         # Handle the operation
@@ -175,21 +214,20 @@ class OperationsManager(QObject):
             self.status_message.emit(status_message)
             return
 
+        self.processing = True
         handler(op)
-        op.advance()
+        self.processing = False
 
         if op.complete:
-            status_message += ': complete.'
+            status_message += ': %s' % (op.message or 'complete.')
             self.operation_complete.emit(op.id)
         elif op.error:
             status_message += ', error: %s' % op.message
-        else:
-            status_message += ': %s' % op.message
+        elif not op.complete and not op.error:
+            status_message += ': %s' % op.message if op.message else ''
 
         self.status_message.emit(status_message)
-
-        # Load the next operations
-        self.load_next()
+        self.dbsession.commit()
 
     def is_error_response(self, response, op):
         """Test if the response is an error, and take appropriate action."""
@@ -215,7 +253,7 @@ class OperationsManager(QObject):
             self.stop()
         # 500 or 503 usually means internal service error or throttling
         elif response.status_code in [500, 503]:
-            self.schedule_op(op, wait=60)
+            op.scheduled = arrow.utcnow().replace(minutes=+1).naive
 
         return True
 
@@ -224,7 +262,7 @@ class OperationsManager(QObject):
         """Make the actual network request."""
         return requests.request(*args, **kwargs)
 
-    def ListMatchingProducts(self, op):
+    def FindAmazonMatches(self, op):
         """Query Amazon for products matching a given listing.
 
         Parameters:     linkif: create a link only if the conditions are met
@@ -293,104 +331,15 @@ class OperationsManager(QObject):
                         and 'salesrank' in params['priceif'] \
                         and amz_listing.salesrank \
                         and amz_listing.salesrank <= int(params['priceif']['salesrank']):
-                    # Build the query string to pass on to GetMyFeesEstimate
+                    # Create the operation, and pass on the parameters for GetMyFeesEstimate
                     fee_params = params.get('feesif')
-
-                    price_op = Operation(priority=op.priority, listing_id=amz_listing.id)
-                    price_op.append('GetCompetitivePricingForASIN', {'fallback': True, 'feesif': fee_params})
+                    price_op = Operation.ItemLookup(listing_id=amz_listing.id,
+                                                    priority=op.priority,
+                                                    params={'feesif': fee_params})
                     self.dbsession.add(price_op)
 
         op.message = '%s links found.' % len(vnd_listing.amz_links)
-        self.dbsession.commit()
-
-    def GetCompetitivePricingForASIN(self, op):
-        """Get the buy box pricing for an Amazon product. Also updates the sales rank.
-
-        Parameters:     fallback=   If no pricing is returned, generate a call to GetLowestOfferListingsForASIN
-
-                        feesif: Get FBA fees if the conditions are met.
-                            priceratio=     The ratio of the listing price to any vendor price is at least priceratio
-
-        """
-        amz_listing = self.dbsession.query(AmazonListing).filter_by(id=op.listing_id).first()
-        params = op.params
-
-        r = self.mwsapi.GetCompetitivePricingForASIN(priority=op.priority, MarketplaceId=self.mwsapi.api.market_id(),
-                                                     ASINList=[amz_listing.sku])
-        if self.is_error_response(r, op):
-            return
-
-        parser = GetCompetitivePricingForASINParser(r.content.decode())
-
-        info = next(parser.get_product_info())
-        if info is None:
-            op.message = 'No valid response.'
-            op.error = True
-            self.dbsession.commit()
-            return
-
-        amz_listing.salesrank = info['salesrank']
-        amz_listing.offers = info.get('newlistings', 0)
-
-        if info['price'] is not None:
-            amz_listing.price = info['price']
-
-            if 'feesif' in params and 'priceratio' in params['feesif']:
-                maxratio = 0
-                for link in self.dbsession.query(LinkedProducts).filter_by(amz_listing_id=amz_listing.id):
-                    maxratio = max(amz_listing.unit_price / link.vnd_listing.unit_price, maxratio)
-
-                if maxratio >= float(params['feesif']['priceratio']):
-                    op.insert(op.current_index + 1,
-                              'GetMyFeesEstimate',
-                              {'price': '%.2f' % info['price']})
-        else:
-            if 'fallback' in params and params['fallback'] == True:
-                fee_params = params.get('feesif')
-                op.insert(op.current_index + 1, 'GetLowestOfferListingsForASIN', {'feesif': fee_params})
-                op.message = 'Falling back to GetLowestOfferListingsForASIN...'
-
-        self.dbsession.commit()
-
-    def GetLowestOfferListingsForASIN(self, op):
-        """Get lowest available pricing from Amazon.
-
-        Parameters:     feesif: Get FBA fees if the conditions are met.
-                            priceratio=     The ratio of the listing price to any vendor price is at least priceratio
-        """
-
-        amz_listing = self.dbsession.query(AmazonListing).filter_by(id=op.listing_id).first()
-        params = op.params
-
-        r = self.mwsapi.GetLowestOfferListingsForASIN(priority=op.priority, MarketplaceId=self.mwsapi.api.market_id(),
-                                                      ASINList=[amz_listing.sku], ItemCondition='New')
-        if self.is_error_response(r, op):
-            return
-
-        parser = GetLowestOfferListingsForAsinParser(r.content.decode())
-
-        price = next(parser.get_prices())
-        if price is None:
-            op.error = True
-            op.message = 'No prices returned.'
-            self.dbsession.commit()
-            return
-
-        amz_listing.price = price['price']
-
-        if amz_listing.price is not None:
-            if 'feesif' in params and 'priceratio' in params['feesif']:
-                maxratio = 0
-                for link in self.dbsession.query(LinkedProducts).filter_by(amz_listing_id=amz_listing.id):
-                    maxratio = max(amz_listing.unit_price / link.vnd_listing.unit_price, maxratio)
-
-                if maxratio >= float(params['feesif']['priceratio']):
-                    op.insert(op.current_index + 1,
-                              'GetMyFeesEstimate',
-                              {'price': '%.2f' % price['price']})
-                    op.message = 'Getting FBA fees...'
-
-        self.dbsession.commit()
+        op.complete = True
 
     def GetMyFeesEstimate(self, op):
         """Get an FBA fees estimate for the given listing.
@@ -398,8 +347,8 @@ class OperationsManager(QObject):
         Parameters:     price=  Update all price points at the given price. If not provided, update all price points
                                 at the current listing price. Create a new price point if none exist.
 
-                        fees=   Set the fees to the given value. If not provided, request fees from Amazon."""
-
+                        fees=   Set the fees to the given value. If not provided, request fees from Amazon.
+        """
         amz_listing = self.dbsession.query(AmazonListing).filter_by(id=op.listing_id).first()
         params = op.params
 
@@ -428,7 +377,6 @@ class OperationsManager(QObject):
             if fees is None or fees['status'] != 'Success':
                 op.error = True
                 op.message = fees['errormessage']
-                self.dbsession.commit()
                 return
             else:
                 fba_fees = fees['amount']
@@ -441,24 +389,109 @@ class OperationsManager(QObject):
             price_point = AmzPriceAndFees(amz_listing=amz_listing, price=price, fba=fba_fees)
             self.dbsession.add(price_point)
 
-        self.dbsession.commit()
+        op.complete = True
 
+    def ItemLookup(self, op):
+        """Use ItemLookup to fill in the Amazon listing's merchant info.
 
-    def AddToProductHistory(self, op):
-        """Push the current state of an Amazon product onto the AmzProductHistory table.
+        Parameters:     feesif:             Schedule an FBA fees request for this listing if the pricing meets the
+                                            criteria.
+                            priceratio=     The ratio of the listing's price to that of any vendor is at least
+                                            'priceratio'.
 
-        Parameters:     repeat=min      Schedule an update of all product information and another AddToProductHistory
-                                        operation for a set number of minutes after this one completes."""
+        """
 
-        amz_listing = self.dbsession.query(AmazonListing).filter_by(id=op.listing_id).first()
+        amz_listing = self.dbsession.query(AmazonListing).filter_by(id=op.listing_id).one()
         params = op.params
 
-        history = AmzProductHistory(amz_listing_id=amz_listing.id,
-                                    price=amz_listing.price,
-                                    salesrank=amz_listing.salesrank,
-                                    hasprime=amz_listing.hasprime,
-                                    merchant_id=amz_listing.merchant_id,
-                                    offers=amz_listing.offers,
-                                    timestamp=amz_listing.updated)
+        r = self.paapi.ItemLookup(priority=op.priority,
+                                  ItemId=amz_listing.sku,
+                                  ResponseGroup='OfferFull,SalesRank,ItemAttributes')
 
-        self.dbsession.add(history)
+        if self.is_error_response(r, op):
+            return
+
+        parser = ItemLookupParser(r.content.decode())
+        info = parser.get_info()
+
+        amz_listing.url = info['url']
+        amz_listing.salesrank = info['salesrank']
+        amz_listing.upc = info['upc']
+        amz_listing.offers = info['offers']
+        amz_listing.price = info['price']
+        amz_listing.hasprime = info['prime']
+        amz_listing.updated = arrow.utcnow().datetime
+
+        merchant = self.dbsession.query(AmazonMerchant).filter_by(name=info['merchant']).first()
+        if merchant:
+            amz_listing.merchant_id = merchant.id
+        else:
+            merchant = AmazonMerchant(name=info['merchant'])
+            self.dbsession.flush()
+            amz_listing.merchant_id = merchant.id
+
+        # Maybe create a fees request
+        if 'feesif' in params \
+                and 'priceratio' in params['feesif'] \
+                and amz_listing.price is not None:
+
+            maxratio = 0
+            for link in self.dbsession.query(LinkedProducts).filter_by(amz_listing_id=amz_listing.id):
+                maxratio = max(amz_listing.unit_price / link.vnd_listing.unit_price, maxratio)
+
+            if maxratio >= float(params['feesif']['priceratio']):
+                op.message = 'Getting FBA fees...'
+                fees_op = Operation.GetMyFeesEstimate(listing_id=amz_listing.id,
+                                                      priority=op.priority,
+                                                      params={'price': amz_listing.price})
+                self.dbsession.add(fees_op)
+
+        op.complete = True
+
+
+    def UpdateAmazonListing(self, op):
+        """Update pricing, salesrank, offers, and merchant info for listing, then add to product history.
+
+        Parameters:         log=        Add the new product data to the log
+                            repeat=     Repeat this operation after the given number of minutes.
+        """
+
+        amz_listing = self.dbsession.query(AmazonListing).filter_by(id=op.listing_id).one()
+        params = op.params
+
+        self.ItemLookup(op)
+
+        if amz_listing.price is None:
+            r = self.mwsapi.GetLowestOfferListingsForASIN(priority=op.priority,
+                                                          MarketplaceId=self.mwsapi.api.market_id(),
+                                                          ASINList=[amz_listing.sku],
+                                                          ItemCondition='New')
+
+            if self.is_error_response(r, op):
+                return
+
+            parser = GetLowestOfferListingsForASINParser(r.content.decode())
+            result = next(parser.get_product_info())
+
+            if result['error']:
+                op.error = True
+                op.message = result['message']
+                return
+            else:
+                amz_listing.price = result['price']
+                amz_listing.hasprime = result['prime']
+
+        if 'log' in params and params['log'] == True:
+            self.dbsession.add(AmzProductHistory(amz_listing_id=amz_listing.id,
+                                                 salesrank=amz_listing.salesrank,
+                                                 hasprime=amz_listing.hasprime,
+                                                 merchant_id=amz_listing.merchant_id,
+                                                 offers=amz_listing.offers,
+                                                 timestamp=func.now()))
+
+        if 'repeat' in params:
+            op.scheduled = arrow.utcnow().replace(minutes=params['repeat']).naive
+        else:
+            op.completed = True
+
+

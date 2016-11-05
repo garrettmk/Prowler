@@ -157,11 +157,12 @@ class OperationDialog(QDialog, Ui_opsDialog):
 
         # Set up the operations list and parameter widgets
         self.amz_ops = OrderedDict()
-        self.amz_ops['GetLowestOfferListingsForASIN'] = QWidget()
+        self.amz_ops['ItemLookup'] = QWidget()
         self.amz_ops['GetMyFeesEstimate'] = QWidget()
+        self.amz_ops['UpdateAmazonListing'] = QWidget()
 
         self.vnd_ops = OrderedDict()
-        self.vnd_ops['ListMatchingProducts'] = ListMatchingProductsParameters()
+        self.vnd_ops['FindAmazonMatches'] = ListMatchingProductsParameters()
 
         for key, widget in chain(self.amz_ops.items(), self.vnd_ops.items()):
             self.paramsStack.addWidget(widget)

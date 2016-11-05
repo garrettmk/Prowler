@@ -1,4 +1,6 @@
 from database import *
+from sqlalchemy.event import listen
+from itertools import chain
 
 engine = create_engine('sqlite:///:memory:')
 Base.metadata.create_all(bind=engine)
@@ -26,6 +28,15 @@ cat1 = AmazonCategory(name='Kitchen Stuff')
 amz1.category = cat1
 
 session.add_all([vnd1, vnd2, vnd3, amz1, link1, link2])
-session.commit()
+# session.commit()
 
+def listener(session):
+    for item in chain(session.new, session.dirty, session.deleted):
+        if isinstance(item, Operation):
+            break
+    else:
+        return
 
+    print('Change in Operation table detected.')
+
+listen(session, 'before_commit', listener)

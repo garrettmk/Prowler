@@ -229,9 +229,7 @@ class Operation(Base):
     id = Column(Integer, primary_key=True)
     priority = Column(Integer, nullable=False, default=0)
 
-    all_operations = Column(String, nullable=False)
-    current_operation = Column(String)
-    current_index = Column(Integer, nullable=False, default=0)
+    operation = Column(String)
 
     scheduled = Column(DateTime, default=func.now())
     complete = Column(Boolean, default=False)
@@ -243,71 +241,16 @@ class Operation(Base):
 
     # Some regexes used for operation string parsing
     re_opname = re.compile(r'(\w+)')
-    re_op_args = re.compile(r'\(([^)]+)\)')
-    re_condition = re.compile(r'(\w+):')
-    re_params = re.compile(r'(\w+)\s*=\s*([^=,)]+)')
+    re_params = re.compile(r'\(([^)]+)\)')
 
     def __repr__(self):
         return "<%s(operation='%s', listing_id=%s, priority=%s, scheduled=%s)>" % \
                (__class__, self.operation, self.listing_id, self.priority, self.scheduled)
 
-    def append(self, action, params=None):
-        """Helper method to add another action at the end of this sequence."""
-        if self.all_operations:
-            all_operations = str(self.all_operations).split(';')
-        else:
-            all_operations = []
-
-        self.insert(len(all_operations), action, params)
-
-    def insert(self, idx, action, params=None):
-        """Insert 'action' into the sequence at the given position."""
-        if params:
-            param_string = json.dumps(params)
-        else:
-            param_string = ''
-
-        new_str = '%s(%s)' % (action, param_string)
-
-        if self.all_operations:
-            all_operations = str(self.all_operations).split(';')
-            all_operations.insert(idx, new_str)
-            self.all_operations = ';'.join(all_operations)
-        else:
-            self.all_operations = new_str
-
-        if self.current_index is None:
-            self.set_current_index(0)
-
-    def advance(self):
-        """Sets next_operation to the next operation in the list."""
-        if self.current_index is None:
-            next_index = 0
-        else:
-            next_index = self.current_index + 1
-
-        try:
-            self.set_current_index(next_index)
-        except IndexError:
-            self.complete = True
-
-    def first(self):
-        self.set_current_index(0)
-
-    def set_current_index(self, index):
-        """Sets the current index and updates next_operation."""
-        ops = str(self.all_operations).split(';')
-        if index > len(ops):
-            self.current_index = len(ops) - 1
-            self.current_operation = ops[-1]
-        else:
-            self.current_operation = ops[index]
-            self.current_index = index
-
     @property
     def operation_name(self):
         """Return the name of this operation."""
-        match = self.re_opname.match(self.current_operation)
+        match = self.re_opname.match(self.operation)
         if match:
             return match.group(1)
         else:
@@ -315,7 +258,7 @@ class Operation(Base):
 
     @property
     def params(self):
-        match = self.re_op_args.search(self.current_operation)
+        match = self.re_params.search(self.operation)
         if match is None:
             return {}
         else:
@@ -323,6 +266,32 @@ class Operation(Base):
 
         params = json.loads(param_string)
         return params
+
+    @staticmethod
+    def GenericOperation(name, params=None, **kwargs):
+        opstring = '%s(%s)' % (name, json.dumps(params) if params else '')
+        return Operation(operation=opstring, **kwargs)
+
+    @staticmethod
+    def FindAmazonMatches(params=None, **kwargs):
+        opstring = 'FindAmazonMatches(%s)' % json.dumps(params) if params else ''
+        return Operation(operation=opstring, **kwargs)
+
+    @staticmethod
+    def GetMyFeesEstimate(params=None, **kwargs):
+        opstring = 'GetMyFeesEstimate(%s)' % json.dumps(params) if params else ''
+        return Operation(operation=opstring, **kwargs)
+
+    @staticmethod
+    def ItemLookup(params=None, **kwargs):
+        opstring = 'ItemLookup(%s)' % json.dumps(params) if params else ''
+        return Operation(operation=opstring, **kwargs)
+
+    @staticmethod
+    def UpdateAmazonListing(params=None, **kwargs):
+        opstring = 'UpdateAmazonListing(%s)' % json.dumps(params) if params else ''
+        return Operation(operation=opstring, **kwargs)
+
 
 
 

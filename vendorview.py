@@ -3,20 +3,38 @@ import csv
 
 from PyQt5.QtCore import QCoreApplication
 from PyQt5.QtGui import QIcon, QPixmap
-from PyQt5.QtWidgets import QAction, QHeaderView, QDialog
+from PyQt5.QtWidgets import QWidget, QAction, QHeaderView, QDialog, QAbstractItemView, QDataWidgetMapper
 
 from database import *
 
 from abstractview import saquery_to_qtquery
 from productview import ProductView
+from vnd_listing_details_ui import Ui_vendorListingDetails
 
 from dialogs import ImportCSVDialog, ProgressDialog
+
+
+class VendorListingDetails(QWidget, Ui_vendorListingDetails):
+
+    def __init__(self, parent=None):
+        super(VendorListingDetails, self).__init__(parent=parent)
+        self.setupUi(self)
+
+        self.titleLine.textChanged.connect(lambda: self.titleLine.home(False))
+
+        # Set up the amazon links table
+        self.amzLinksTable.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.amzLinksTable.setSelectionMode(QAbstractItemView.SingleSelection)
 
 
 class VendorView(ProductView):
 
     def __init__(self, parent=None):
         super(VendorView, self).__init__(parent=parent)
+
+        # Create the details section
+        self.details = VendorListingDetails(self)
+        self.layout().addWidget(self.details)
 
         # Set up the toolbar actions
         self.actionImport_CSV = QAction(self)
@@ -29,23 +47,40 @@ class VendorView(ProductView):
         # Make connections
         self.actionImport_CSV.triggered.connect(self.import_csv)
 
-        # Final setup
+        # Populate the table
         self.populate_source_box()
         self.show_listings()
+
+        # Set up the data widget mapper
+        mapper = QDataWidgetMapper(self)
+        mapper.setModel(self.mainTable.model())
+        self.mainTable.selectionModel().currentRowChanged.connect(mapper.setCurrentModelIndex)
+
+        mapper.addMapping(self.details.titleLine, self.mainModel.fieldIndex('Description'))
+        mapper.addMapping(self.details.brandLine, self.mainModel.fieldIndex('Brand'))
+        mapper.addMapping(self.details.modelLine, self.mainModel.fieldIndex('Model'))
+        mapper.addMapping(self.details.skuLine, self.mainModel.fieldIndex('SKU'))
+        mapper.addMapping(self.details.upcLine, self.mainModel.fieldIndex('UPC'))
+        mapper.addMapping(self.details.vendorLine, self.mainModel.fieldIndex('Vendor'))
+        mapper.addMapping(self.details.priceBox, self.mainModel.fieldIndex('Price'))
+        mapper.addMapping(self.details.urlLine, self.mainModel.fieldIndex('URL'))
+        mapper.addMapping(self.details.quantityBox, self.mainModel.fieldIndex('Quantity'))
+        mapper.addMapping(self.details.updatedLine, self.mainModel.fieldIndex('Updated'))
 
     def is_amazon(self):
         return False
 
     def show_listings(self, source=None):
         query = self.dbsession.query(VendorListing.id,
-                                     Vendor.name.label('Source'),
+                                     Vendor.name.label('Vendor'),
                                      VendorListing.sku.label('SKU'),
                                      VendorListing.brand.label('Brand'),
                                      VendorListing.model.label('Model'),
                                      VendorListing.quantity.label('Quantity'),
                                      VendorListing.price.label('Price'),
                                      VendorListing.title.label('Description'),
-                                     VendorListing.updated.label('Last Update')
+                                     VendorListing.updated.label('Updated'),
+                                     VendorListing.url.label('URL')
                                      ).filter(Vendor.id == VendorListing.vendor_id)
 
         if source and source != 'All Vendor products':

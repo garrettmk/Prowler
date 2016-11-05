@@ -32,6 +32,11 @@ class Ui_productView(object):
         icon1.addPixmap(QtGui.QPixmap("icons/repeat.png"), QtGui.QIcon.Normal, QtGui.QIcon.On)
         self.actionReload.setIcon(icon1)
         self.actionReload.setObjectName("actionReload")
+        self.actionRemove_from_list = QtWidgets.QAction(productView)
+        icon2 = QtGui.QIcon()
+        icon2.addPixmap(QtGui.QPixmap("icons/multiply-1.png"), QtGui.QIcon.Normal, QtGui.QIcon.On)
+        self.actionRemove_from_list.setIcon(icon2)
+        self.actionRemove_from_list.setObjectName("actionRemove_from_list")
 
         self.retranslateUi(productView)
         QtCore.QMetaObject.connectSlotsByName(productView)
@@ -43,4 +48,6 @@ class Ui_productView(object):
         self.actionAdd_to_list.setToolTip(_translate("productView", "Add to list"))
         self.actionReload.setText(_translate("productView", "Reload"))
         self.actionReload.setToolTip(_translate("productView", "Reload"))
+        self.actionRemove_from_list.setText(_translate("productView", "Remove from list..."))
+        self.actionRemove_from_list.setToolTip(_translate("productView", "Remove from list"))
 

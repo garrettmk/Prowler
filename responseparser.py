@@ -25,7 +25,7 @@ class MWSResponseParser:
         response = self.re_ns_close.sub('/', response)   # Remove namespaces in closing tags
         return response
 
-    def _xpath_get(self, path, root=None, dtype=str, default=None):
+    def xpath_get(self, path, root=None, dtype=str, default=None):
         """Use XPath to get values under a root node, including type casting and a default value."""
         root = root if root is not None else self.tree
         items = root.xpath(path)
@@ -39,15 +39,15 @@ class ErrorResponseParser(MWSResponseParser):
 
     @property
     def type(self):
-        return self._xpath_get('.//Error/Type')
+        return self.xpath_get('.//Error/Type')
 
     @property
     def code(self):
-        return self._xpath_get('.//Error/Code')
+        return self.xpath_get('.//Error/Code')
 
     @property
     def message(self):
-        return self._xpath_get('.//Error/Message')
+        return self.xpath_get('.//Error/Message')
 
 
 class ListMatchingProductsParser(MWSResponseParser):
@@ -57,26 +57,26 @@ class ListMatchingProductsParser(MWSResponseParser):
         for tag in self.tree.iterdescendants('Product'):
             product = {}
 
-            product['asin'] = self._xpath_get('.//MarketplaceASIN/ASIN', tag)
+            product['asin'] = self.xpath_get('.//MarketplaceASIN/ASIN', tag)
 
-            product['brand'] = self._xpath_get('.//Brand', tag) \
-                               or self._xpath_get('.//Manufacturer', tag) \
-                               or self._xpath_get('.//Label', tag)
+            product['brand'] = self.xpath_get('.//Brand', tag) \
+                               or self.xpath_get('.//Manufacturer', tag) \
+                               or self.xpath_get('.//Label', tag)
 
-            product['model'] = self._xpath_get('.//Model', tag) \
-                               or self._xpath_get('.//PartNumber', tag)
+            product['model'] = self.xpath_get('.//Model', tag) \
+                               or self.xpath_get('.//PartNumber', tag)
 
             # I don't know if UPC is provided by ListMatchingProducts...
-            product['upc'] = self._xpath_get('.//UPC', tag)
+            product['upc'] = self.xpath_get('.//UPC', tag)
 
-            product['title'] = self._xpath_get('.//Title', tag)
+            product['title'] = self.xpath_get('.//Title', tag)
 
             # TODO: Implement a more robust/accurate way to get category and sales rank
-            product['productcategoryid'] = self._xpath_get('.//ProductCategoryId', tag)
-            product['salesrank'] = self._xpath_get('.//SalesRank/Rank', tag, int)
+            product['productcategoryid'] = self.xpath_get('.//ProductCategoryId', tag)
+            product['salesrank'] = self.xpath_get('.//SalesRank/Rank', tag, int)
 
-            product['quantity'] = max(self._xpath_get('.//NumberOfItems', tag, int, default=0),
-                                      self._xpath_get('.//PackageQuantity', tag, int, default=0),
+            product['quantity'] = max(self.xpath_get('.//NumberOfItems', tag, int, default=0),
+                                      self.xpath_get('.//PackageQuantity', tag, int, default=0),
                                       1)
 
             features = []
@@ -93,21 +93,22 @@ class GetCompetitivePricingForASINParser(MWSResponseParser):
 
         for tag in self.tree.iterdescendants('Product'):
             product = {}
-            product['asin'] = self._xpath_get('.//ASIN', tag)
+            product['asin'] = self.xpath_get('.//ASIN', tag)
 
             for comp_price in tag.iterdescendants('CompetitivePrice'):
                 if comp_price.attrib['condition'] == 'New':
-                    product['landed'] = self._xpath_get('.//LandedPrice/Amount', tag, float)
-                    product['listing'] = self._xpath_get('.//ListingPrice/Amount', tag, float)
-                    product['price'] = product['landed'] or product['listing']
+                    product['landed price'] = self.xpath_get('.//LandedPrice/Amount', tag, float)
+                    product['list price'] = self.xpath_get('.//ListingPrice/Amount', tag, float)
+                    product['price'] = product['landed price'] or product['list price']
             else:
-                product['landed'] = product.get('landed', None)
-                product['listing'] = product.get('listing', None)
+                product['landed price'] = product.get('landed', None)
+                product['list price'] = product.get('listing', None)
                 product['price'] = product.get('price', None)
 
-            product['productcategoryid'] = self._xpath_get('.//SalesRank/ProductCategoryId')
-            product['salesrank'] = self._xpath_get('.//SalesRank/Rank', tag, int)
+            product['productcategoryid'] = self.xpath_get('.//SalesRank/ProductCategoryId')
+            product['salesrank'] = self.xpath_get('.//SalesRank/Rank', tag, int)
 
+            product['newlistings'] = 0
             for count in tag.iterdescendants('OfferListingCount'):
                 if count.attrib['condition'] == 'New':
                     product['newlistings'] = int(count.text)
@@ -115,18 +116,32 @@ class GetCompetitivePricingForASINParser(MWSResponseParser):
             yield product
 
 
-class GetLowestOfferListingsForAsinParser(MWSResponseParser):
+class GetLowestOfferListingsForASINParser(MWSResponseParser):
 
-    def get_prices(self):
+    def get_product_info(self):
 
-        for tag in self.tree.iterdescendants('Product'):
-            prices = {}
-            prices['asin'] = self._xpath_get('.//MarketplaceASIN/ASIN', tag)
-            prices['landed'] = self._xpath_get('.//LandedPrice/Amount', tag, float)
-            prices['listing'] = self._xpath_get('.//ListingPrice/Amount', tag, float)
-            prices['price'] = prices['landed'] or prices['listing']
+        for result_tag in self.tree.iterdescendants('GetLowestOfferListingsForASINResult'):
+            result = {}
 
-            yield prices
+            if result_tag.attrib['status'] != 'Success':
+                result['error'] = True
+                result['asin'] = result_tag.attrib['ASIN']
+                result['type'] = self.xpath_get('.//Type', result_tag)
+                result['code'] = self.xpath_get('.//Code', result_tag)
+                result['message'] = self.xpath_get('.//Message', result_tag)
+            else:
+                result['error'] = False
+                result['asin'] = self.xpath_get('.//ASIN', result_tag)
+                result['price'] = self.xpath_get('.//LandedPrice/Amount', result_tag, float) \
+                                  or self.xpath_get('.//ListingPrice/Amount', result_tag, float)
+
+                channel = self.xpath_get('.//FulfillmentChannel', result_tag)
+                if channel == 'Amazon':
+                    result['prime'] = True
+                else:
+                    result['prime'] = False
+
+            yield result
 
 
 class GetMyFeesEstimateParser(MWSResponseParser):
@@ -135,14 +150,38 @@ class GetMyFeesEstimateParser(MWSResponseParser):
 
         for tag in self.tree.iterdescendants('FeesEstimateResult'):
             result = {}
-            result['status'] = self._xpath_get('.//Status', tag)
-            result['asin'] = self._xpath_get('.//IdValue', tag)
-            result['amount'] = self._xpath_get('.//TotalFeesEstimate/Amount', tag, float)
-            result['errortype'] = self._xpath_get('.//Error/Type', tag)
-            result['errorcode'] = self._xpath_get('.//Error/Code', tag)
-            result['errormessage'] = self._xpath_get('.//Error/Message', tag)
+            result['status'] = self.xpath_get('.//Status', tag)
+            result['asin'] = self.xpath_get('.//IdValue', tag)
+            result['amount'] = self.xpath_get('.//TotalFeesEstimate/Amount', tag, float)
+            result['errortype'] = self.xpath_get('.//Error/Type', tag)
+            result['errorcode'] = self.xpath_get('.//Error/Code', tag)
+            result['errormessage'] = self.xpath_get('.//Error/Message', tag)
 
             yield result
+
+
+class ItemLookupParser(MWSResponseParser):
+
+    def get_info(self):
+        info = {}
+
+        info['asin'] = self.xpath_get('.//ASIN')
+        info['url'] = self.xpath_get('.//DetailPageURL')
+        info['salesrank'] = self.xpath_get('.//SalesRank', dtype=int)
+        info['upc'] = self.xpath_get('.//UPC')
+
+        info['offers'] = self.xpath_get('.//OfferSummary/TotalNew', dtype=int)
+        info['merchant'] = self.xpath_get('.//Merchant/Name')
+        info['price'] = self.xpath_get('.//Price/Amount', dtype=int)
+
+        if info['price']:
+            info['price'] /= 100
+
+        info['prime'] = bool(self.xpath_get('.//IsEligibleForPrime', dtype=int, default=0))
+
+        return info
+
+
 
 
 testxml = """<ListMatchingProductsResponse xmlns="http://mws.amazonservices.com/schema/Products/2011-10-01">
@@ -485,5 +524,36 @@ xml3 = """<?xml version="1.0"?>
 </GetCompetitivePricingForASINResult>
 <ResponseMetadata>
   <RequestId>97fcb77a-9c70-4379-baab-ce47b719f26f</RequestId>
+</ResponseMetadata>
+</GetCompetitivePricingForASINResponse>"""
+
+xml4 = """<?xml version="1.0"?>
+<GetCompetitivePricingForASINResponse xmlns="http://mws.amazonservices.com/schema/Products/2011-10-01">
+<GetCompetitivePricingForASINResult ASIN="B01BF6DQK8" status="Success">
+  <Product xmlns="http://mws.amazonservices.com/schema/Products/2011-10-01" xmlns:ns2="http://mws.amazonservices.com/schema/Products/2011-10-01/default.xsd">
+    <Identifiers>
+      <MarketplaceASIN>
+        <MarketplaceId>ATVPDKIKX0DER</MarketplaceId>
+        <ASIN>B01BF6DQK8</ASIN>
+      </MarketplaceASIN>
+    </Identifiers>
+    <CompetitivePricing>
+      <CompetitivePrices/>
+      <NumberOfOfferListings/>
+    </CompetitivePricing>
+    <SalesRankings>
+      <SalesRank>
+        <ProductCategoryId>home_garden_display_on_website</ProductCategoryId>
+        <Rank>4023848</Rank>
+      </SalesRank>
+      <SalesRank>
+        <ProductCategoryId>2245508011</ProductCategoryId>
+        <Rank>1856</Rank>
+      </SalesRank>
+    </SalesRankings>
+  </Product>
+</GetCompetitivePricingForASINResult>
+<ResponseMetadata>
+  <RequestId>1e37d1fe-9479-4501-adff-a88948ee0248</RequestId>
 </ResponseMetadata>
 </GetCompetitivePricingForASINResponse>"""

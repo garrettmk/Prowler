@@ -51,6 +51,19 @@
     <string>Reload</string>
    </property>
   </action>
+  <action name="actionRemove_from_list">
+   <property name="icon">
+    <iconset>
+     <normalon>icons/multiply-1.png</normalon>
+    </iconset>
+   </property>
+   <property name="text">
+    <string>Remove from list...</string>
+   </property>
+   <property name="toolTip">
+    <string>Remove from list</string>
+   </property>
+  </action>
  </widget>
  <resources/>
  <connections/>

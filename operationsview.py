@@ -41,10 +41,10 @@ class OperationsView(AbstractView, Ui_operationsView):
         for op_name in self.opsman.supported_ops:
             num = self.dbsession.query(Operation).\
                                  filter(and_(Operation.complete == False, Operation.error == False)).\
-                                 filter(Operation.current_operation.like('%s%%' % op_name)).\
+                                 filter(Operation.operation.like('%s%%' % op_name)).\
                                  count()
 
-            est_time += num * self.opsman.mwsapi.throttle_limits(op_name).restore_rate
+            # est_time += num * self.opsman.mwsapi.throttle_limits(op_name).restore_rate
 
         self.pendingBox.setValue(pending)
         self.completedBox.setValue(completed)
@@ -87,10 +87,10 @@ class OperationsView(AbstractView, Ui_operationsView):
 
         # Add to the operation table
         for row in query:
-            op = Operation(listing_id=row.id)
-            op.append(dialog.operation, dialog.params)
+            op = Operation.GenericOperation(name=dialog.operation,
+                                            params=dialog.params,
+                                            listing_id=row.id)
             self.dbsession.add(op)
 
         self.dbsession.commit()
         self.update_counts()
-        self.actionStart.trigger()

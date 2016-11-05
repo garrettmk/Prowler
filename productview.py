@@ -1,10 +1,12 @@
+import webbrowser
+
 from PyQt5.QtCore import Qt, QSortFilterProxyModel
-from PyQt5.QtWidgets import QAbstractItemView, QComboBox, QWidgetAction, QMenu
+from PyQt5.QtWidgets import QWidget, QAbstractItemView, QComboBox, QWidgetAction, QMenu, QMessageBox
 from PyQt5.QtSql import QSqlTableModel
 
 from database import *
 
-from abstractview import AbstractView
+from abstractview import AbstractView, saquery_to_qtquery
 from productview_ui import Ui_productView
 from dialogs import SelectListDialog
 
@@ -112,3 +114,56 @@ class ProductView(AbstractView, Ui_productView):
 
         self.dbsession.commit()
         self.populate_source_box()
+
+
+class ProductViewDetails(QWidget):
+
+    def __init__(self, parent=None):
+        super(ProductViewDetails, self).__init__(parent=parent)
+
+        self.listing = None
+        self.productModel = QSqlTableModel(self)
+        self.dbsession = Session()
+
+        ProductViewDetails.set_listing(self, None)
+
+    def set_listing(self, listing):
+        """Set the widget's currently selected listing."""
+
+    def open_vendor(self):
+        """Open a vendor info dialog."""
+
+    def open_listing_url(self):
+        """Open the listing's URL in a separate window."""
+        if self.listing is None or self.listing.url is None:
+            QMessageBox.information(self, 'Error', 'No URL available.')
+            return
+
+        webbrowser.open(self.listing.url)
+
+    def google_listing(self):
+        """Search Google for the listing's brand and model."""
+        if self.listing is None \
+            or self.listing.brand is None \
+            or self.listing.model is None:
+            QMessageBox.information(self, 'Error', 'No listing selected, or required information unavailable.')
+            return
+
+        q = '{} {}'.format(self.listing.brand, self.listing.model).replace(' ', '+')
+        url = 'http://www.google.com/?gws_rd=ssl#q={}'.format(q)
+
+        webbrowser.open(url)
+
+    def upc_lookup(self):
+        """Open a UPC lookup in a separate window."""
+        if self.listing is None \
+            or self.listing.upc is None:
+            QMessageBox.information(self, 'Error', 'No listing selected, or no UPC code available.')
+            return
+
+        url = 'http://www.upcitemdb.com/upc/%s' % self.listing.upc
+        webbrowser.open(url)
+
+    def delete_listing(self):
+        """Delete the currently selected listing from the database."""
+
