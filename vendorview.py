@@ -1,30 +1,71 @@
 import arrow
 import csv
 
-from PyQt5.QtCore import QCoreApplication
+from PyQt5.QtCore import Qt, QCoreApplication
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import QWidget, QAction, QHeaderView, QDialog, QAbstractItemView, QDataWidgetMapper
+from PyQt5.QtWidgets import QHBoxLayout, QTabWidget, QFrame
+from PyQt5.QtSql import QSqlTableModel
 
 from database import *
 
 from abstractview import saquery_to_qtquery
-from productview import ProductView
+from productview import ProductView, ProductDetailsWidget, ProductLinksWidget
 from vnd_listing_details_ui import Ui_vendorListingDetails
+from vnd_listing_links_ui import Ui_vndListingLinks
 
 from dialogs import ImportCSVDialog, ProgressDialog
 
 
-class VendorListingDetails(QWidget, Ui_vendorListingDetails):
+class VndProductDetailsWidget(ProductDetailsWidget, Ui_vendorListingDetails):
 
     def __init__(self, parent=None):
-        super(VendorListingDetails, self).__init__(parent=parent)
-        self.setupUi(self)
+        super(VndProductDetailsWidget, self).__init__(parent=parent)
+        # setupUi() is called by the base class
 
-        self.titleLine.textChanged.connect(lambda: self.titleLine.home(False))
+        self.mapper.addMapping(self.urlLine, self.productModel.fieldIndex('url'))
+        self.mapper.addMapping(self.updatedLine, self.productModel.fieldIndex('updated'))
 
-        # Set up the amazon links table
-        self.amzLinksTable.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.amzLinksTable.setSelectionMode(QAbstractItemView.SingleSelection)
+    def set_listing(self, listing):
+        super(VndProductDetailsWidget, self).set_listing(listing)
+
+        vnd_name = self.sel_listing.vendor.name if self.sel_listing else ''
+        self.vendorLine.setText(vnd_name)
+
+    def lines_home(self):
+        super(VndProductDetailsWidget, self).lines_home()
+        self.updatedLine.home(False)
+        self.urlLine.home(False)
+
+
+class VndProductLinksWidget(ProductLinksWidget):
+
+    def __init__(self, parent=None):
+        super(VndProductLinksWidget, self).__init__(parent=parent)
+        # setupUi() is called by the parent class
+
+    def set_listing(self, listing):
+        super(VndProductLinksWidget, self).set_listing(listing)
+
+        listing_id = listing.id if listing else None
+
+        stmt = self.dbsession.query(LinkedProducts.confidence,
+                                    AmazonListing).\
+                              filter(LinkedProducts.vnd_listing_id == listing_id,
+                                     LinkedProducts.amz_listing_id == AmazonListing.id).\
+                              subquery()
+
+        query = self.dbsession.query(stmt.c.id.label('id'),
+                                     func.printf('%.1f%%', stmt.c.confidence).label('Conf.'),
+                                     stmt.c.sku.label('ASIN'),
+                                     stmt.c.title.label('Title'),
+                                     stmt.c.price.label('Price'),
+                                     stmt.c.quantity.label('Quantity'))
+
+        qt_query = saquery_to_qtquery(query)
+        qt_query.exec_()
+        self.linksModel.setQuery(qt_query)
+        self.linksModel.select()
 
 
 class VendorView(ProductView):
@@ -32,9 +73,36 @@ class VendorView(ProductView):
     def __init__(self, parent=None):
         super(VendorView, self).__init__(parent=parent)
 
+        self.vnd_listing = None
+
         # Create the details section
-        self.details = VendorListingDetails(self)
-        self.layout().addWidget(self.details)
+        self.details = VndProductDetailsWidget(self)
+        self.links = VndProductLinksWidget(self)
+        line = QFrame()
+        line.setFrameShape(QFrame.VLine)
+        line.setFrameShadow(QFrame.Sunken)
+
+        details_layout = QHBoxLayout()
+        details_layout.setContentsMargins(5, 0, 5, 5)
+        details_layout.addWidget(self.details)
+        details_layout.addWidget(line)
+        details_layout.addWidget(self.links)
+
+        details_widget = QWidget()
+        details_widget.setLayout(details_layout)
+
+        # Create tabs
+        self.tabs = QTabWidget(self)
+        self.tabs.addTab(details_widget, 'Product Details')
+
+        self.layout().addWidget(self.tabs)
+
+        # Connections
+        self.mainTable.selectionModel().currentRowChanged.connect(self.on_selection_change)
+
+        # Populate the table
+        self.populate_source_box()
+        self.show_listings()
 
         # Set up the toolbar actions
         self.actionImport_CSV = QAction(self)
@@ -47,28 +115,17 @@ class VendorView(ProductView):
         # Make connections
         self.actionImport_CSV.triggered.connect(self.import_csv)
 
-        # Populate the table
-        self.populate_source_box()
-        self.show_listings()
-
-        # Set up the data widget mapper
-        mapper = QDataWidgetMapper(self)
-        mapper.setModel(self.mainTable.model())
-        self.mainTable.selectionModel().currentRowChanged.connect(mapper.setCurrentModelIndex)
-
-        mapper.addMapping(self.details.titleLine, self.mainModel.fieldIndex('Description'))
-        mapper.addMapping(self.details.brandLine, self.mainModel.fieldIndex('Brand'))
-        mapper.addMapping(self.details.modelLine, self.mainModel.fieldIndex('Model'))
-        mapper.addMapping(self.details.skuLine, self.mainModel.fieldIndex('SKU'))
-        mapper.addMapping(self.details.upcLine, self.mainModel.fieldIndex('UPC'))
-        mapper.addMapping(self.details.vendorLine, self.mainModel.fieldIndex('Vendor'))
-        mapper.addMapping(self.details.priceBox, self.mainModel.fieldIndex('Price'))
-        mapper.addMapping(self.details.urlLine, self.mainModel.fieldIndex('URL'))
-        mapper.addMapping(self.details.quantityBox, self.mainModel.fieldIndex('Quantity'))
-        mapper.addMapping(self.details.updatedLine, self.mainModel.fieldIndex('Updated'))
-
     def is_amazon(self):
         return False
+
+    def on_selection_change(self, current, previous):
+        src_idx = self.mainTable.model().mapToSource(current)
+        id_idx = self.mainModel.index(src_idx.row(), self.mainModel.fieldIndex('id'))
+        vnd_id = id_idx.data(Qt.DisplayRole)
+
+        self.vnd_listing = self.dbsession.query(VendorListing).filter_by(id=vnd_id).one()
+        self.details.set_listing(self.vnd_listing)
+        self.links.set_listing(self.vnd_listing)
 
     def show_listings(self, source=None):
         query = self.dbsession.query(VendorListing.id,

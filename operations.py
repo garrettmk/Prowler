@@ -64,7 +64,7 @@ class OperationsManager(QObject):
             cls.__instance__ = OperationsManager(parent=parent)
         return cls.__instance__
 
-    supported_ops = ['FindAmazonMatches', 'GetMyFeesEstimate', 'ItemLookup', 'UpdateAndLog']
+    supported_ops = ['FindAmazonMatches', 'GetMyFeesEstimate', 'UpdateAmazonListing', 'SearchAmazon']
 
     operation_complete = pyqtSignal(int)
     status_message = pyqtSignal(str)
@@ -75,6 +75,7 @@ class OperationsManager(QObject):
         self.scheduled = {}
         self.processing = False
         self.running = True
+        self._callbacks = {}
 
         listen(self.dbsession, 'before_commit', self._before_commit_listener)
 
@@ -93,6 +94,9 @@ class OperationsManager(QObject):
         for operation in self.mwsapi.limits:
             self.mwsapi.set_priority_quota(operation, priority=0, quota=self.mwsapi.limits[operation].quota_max - 2)
             self.mwsapi.set_priority_quota(operation, priority=10, quota=2)
+
+    def register_callback(self, op, callback):
+        self._callbacks[op] = callback
 
     def _before_commit_listener(self, session):
         """Checks if any Operations have been added/modified in the session. If so, calls load_next()."""
@@ -129,7 +133,7 @@ class OperationsManager(QObject):
             eligible_ops = self.dbsession.query(Operation).\
                                           filter(Operation.complete == False).\
                                           filter(Operation.error == False).\
-                                          filter(Operation.operation.like('%s%%' % op_name))
+                                          filter(Operation.operation == op_name)
 
             # Get the highest-priority event older than the current time
             next_op = eligible_ops.filter(Operation.scheduled <= func.now()).\
@@ -149,7 +153,7 @@ class OperationsManager(QObject):
 
             # Make sure only one operation of this type is scheduled at a time
             for timer_id, sched_op in {k:v for k, v in self.scheduled.items()}.items():
-                if sched_op.operation_name == next_op.operation_name:
+                if sched_op.operation == next_op.operation:
                     self.killTimer(timer_id)
                     self.scheduled.pop(timer_id)
 
@@ -159,7 +163,7 @@ class OperationsManager(QObject):
         """Get the required wait and set a timer for the given operation."""
         if wait is None:
             # Get next available time from the throttler
-            throttled_wait = self.get_wait(op.operation_name, op.priority)
+            throttled_wait = self.get_wait(op.operation, op.priority)
 
             delta = op.scheduled - arrow.utcnow().naive
             scheduled_wait = delta.total_seconds()
@@ -175,11 +179,15 @@ class OperationsManager(QObject):
         if operation == 'FindAmazonMatches':
             return self.mwsapi.request_wait('ListMatchingProducts', priority)
 
-        elif operation == 'ItemLookup':
-            return self.paapi.request_wait('ItemLookup', priority)
-
         elif operation == 'GetMyFeesEstimate':
             return self.mwsapi.request_wait('GetMyFeesEstimate', priority)
+
+        elif operation == 'UpdateAmazonListing':
+            return self.paapi.request_wait('ItemLookup', priority) \
+                   + self.mwsapi.request_wait('GetLowestOfferListingsForASIN', priority)
+
+        elif operation == 'SearchAmazon':
+            return self.mwsapi.request_wait('ListMatchingProducts', priority)
 
         else:
             return max(self.mwsapi.request_wait(operation, priority), self.paapi.request_wait(operation, priority))
@@ -203,8 +211,8 @@ class OperationsManager(QObject):
             return
 
         # Handle the operation
-        status_message = 'Processing: \'%s\', priority=%s' % (op.operation_name, op.priority)
-        handler = getattr(self, op.operation_name, None)
+        status_message = 'Processing: \'%s\', priority=%s' % (op.operation, op.priority)
+        handler = getattr(self, op.operation, None)
         if handler is None:
             op.error = True
             op.message = 'No handler found.'
@@ -217,6 +225,11 @@ class OperationsManager(QObject):
         self.processing = True
         handler(op)
         self.processing = False
+        self.dbsession.commit()
+
+        if op.complete or op.error:
+            if self._callbacks.get(op):
+                self._callbacks[op](op)
 
         if op.complete:
             status_message += ': %s' % (op.message or 'complete.')
@@ -227,7 +240,6 @@ class OperationsManager(QObject):
             status_message += ': %s' % op.message if op.message else ''
 
         self.status_message.emit(status_message)
-        self.dbsession.commit()
 
     def is_error_response(self, response, op):
         """Test if the response is an error, and take appropriate action."""
@@ -262,10 +274,67 @@ class OperationsManager(QObject):
         """Make the actual network request."""
         return requests.request(*args, **kwargs)
 
+    def SearchAmazon(self, op):
+        """Find Amazon listings based on given search terms. Add the results to a list.
+
+        Parameters:     terms=      A string containing search terms.
+                        addtolist=  A list name to add results to.
+        """
+        params = op.params
+
+        r = self.mwsapi.ListMatchingProducts(priority=op.priority, MarketplaceId=self.mwsapi.api.market_id(), Query=params['terms'])
+        if self.is_error_response(r, op):
+            return
+
+        parser = ListMatchingProductsParser(r.content.decode())
+
+        for product in parser.get_products():
+            previous_id = self.dbsession.query(AmazonListing.id).filter_by(sku=product['asin']).scalar()
+            amz_listing = self.dbsession.merge(AmazonListing(id=previous_id, vendor_id=0, sku=product['asin']))
+
+            amz_listing.title = product['title']
+            amz_listing.brand = product['brand']
+            amz_listing.model = product['model']
+            amz_listing.upc = product['upc']
+            amz_listing.quantity = product['quantity']
+            amz_listing.salesrank = product['salesrank']
+            amz_listing.updated = func.now()
+
+            self.dbsession.add(amz_listing)
+
+            # Create a new category if necessary
+            pcid = product['productcategoryid']
+            if pcid is not None:
+                category = self.dbsession.query(AmazonCategory).filter_by(product_category_id=pcid).first()
+                if category is None:
+                    category = AmazonCategory(name=pcid, product_category_id=pcid)
+                    self.dbsession.add(category)
+                amz_listing.category = category
+
+            # Add to list
+            if 'addtolist' in params:
+                add_list = self.dbsession.query(List).filter_by(name=params['addtolist']).first()
+                if add_list is None:
+                    add_list = List(name=params['addtolist'], is_amazon=True)
+                    self.dbsession.add(add_list)
+                    self.dbsession.flush()
+
+                self.dbsession.add(self.dbsession.merge(ListMembership(list_id=add_list.id,
+                                                                       listing_id=amz_listing.id)))
+
+            # Schedule an update to fill in the rest of the product info
+            self.dbsession.flush()
+            self.dbsession.add(Operation.UpdateAmazonListing(listing_id=amz_listing.id, priority=op.priority))
+
+        op.complete = True
+
     def FindAmazonMatches(self, op):
         """Query Amazon for products matching a given listing.
 
-        Parameters:     linkif: create a link only if the conditions are met
+        Parameters:     addtolist=  Add successful matches to the named list. Creates the list
+                                    if it doesn't exist yet.
+
+                        linkif: create a link only if the conditions are met
                             conf: match confidence greater than or equal to the given value.
 
                         priceif: create followup operations to get pricing for matched products
@@ -296,7 +365,7 @@ class OperationsManager(QObject):
             amz_listing.upc = product['upc']
             amz_listing.quantity = product['quantity']
             amz_listing.salesrank = product['salesrank']
-            amz_listing.updated = arrow.utcnow().datetime
+            amz_listing.updated = func.now()
 
             # Create a new category if necessary
             pcid = product['productcategoryid']
@@ -333,10 +402,21 @@ class OperationsManager(QObject):
                         and amz_listing.salesrank <= int(params['priceif']['salesrank']):
                     # Create the operation, and pass on the parameters for GetMyFeesEstimate
                     fee_params = params.get('feesif')
-                    price_op = Operation.ItemLookup(listing_id=amz_listing.id,
-                                                    priority=op.priority,
-                                                    params={'feesif': fee_params})
+                    price_op = Operation.UpdateAmazonListing(listing_id=amz_listing.id,
+                                                             priority=op.priority,
+                                                             params={'feesif': fee_params})
                     self.dbsession.add(price_op)
+
+                # Add to list
+                if 'addtolist' in params:
+                    add_list = self.dbsession.query(List).filter_by(name=params['addtolist']).first()
+                    if add_list is None:
+                        add_list = List(name=params['addtolist'], is_amazon=True)
+                        self.dbsession.add(add_list)
+                        self.dbsession.flush()
+
+                    self.dbsession.add(self.dbsession.merge(ListMembership(list_id=add_list.id,
+                                                                           listing_id=amz_listing.id)))
 
         op.message = '%s links found.' % len(vnd_listing.amz_links)
         op.complete = True
@@ -391,13 +471,15 @@ class OperationsManager(QObject):
 
         op.complete = True
 
-    def ItemLookup(self, op):
-        """Use ItemLookup to fill in the Amazon listing's merchant info.
+    def UpdateAmazonListing(self, op):
+        """Update pricing, salesrank, offers, and merchant info for listing, then add to product history.
 
-        Parameters:     feesif:             Schedule an FBA fees request for this listing if the pricing meets the
-                                            criteria.
-                            priceratio=     The ratio of the listing's price to that of any vendor is at least
-                                            'priceratio'.
+        Parameters:         log=        Add the new product data to the log
+                            repeat=     Repeat this operation after the given number of minutes.
+                            feesif:     Schedule an FBA fees request for this listing if the pricing meets the
+                                        criteria.
+                                priceratio=     The ratio of the listing's price to that of any vendor is at least
+                                                'priceratio'.
 
         """
 
@@ -420,47 +502,20 @@ class OperationsManager(QObject):
         amz_listing.offers = info['offers']
         amz_listing.price = info['price']
         amz_listing.hasprime = info['prime']
-        amz_listing.updated = arrow.utcnow().datetime
+        amz_listing.updated = arrow.utcnow().naive
 
+        # Add a new merchant if necessary
         merchant = self.dbsession.query(AmazonMerchant).filter_by(name=info['merchant']).first()
         if merchant:
             amz_listing.merchant_id = merchant.id
         else:
-            merchant = AmazonMerchant(name=info['merchant'])
+            name = info['merchant'] or 'N/A'
+            merchant = AmazonMerchant(name=name)
+            self.dbsession.add(merchant)
             self.dbsession.flush()
             amz_listing.merchant_id = merchant.id
 
-        # Maybe create a fees request
-        if 'feesif' in params \
-                and 'priceratio' in params['feesif'] \
-                and amz_listing.price is not None:
-
-            maxratio = 0
-            for link in self.dbsession.query(LinkedProducts).filter_by(amz_listing_id=amz_listing.id):
-                maxratio = max(amz_listing.unit_price / link.vnd_listing.unit_price, maxratio)
-
-            if maxratio >= float(params['feesif']['priceratio']):
-                op.message = 'Getting FBA fees...'
-                fees_op = Operation.GetMyFeesEstimate(listing_id=amz_listing.id,
-                                                      priority=op.priority,
-                                                      params={'price': amz_listing.price})
-                self.dbsession.add(fees_op)
-
-        op.complete = True
-
-
-    def UpdateAmazonListing(self, op):
-        """Update pricing, salesrank, offers, and merchant info for listing, then add to product history.
-
-        Parameters:         log=        Add the new product data to the log
-                            repeat=     Repeat this operation after the given number of minutes.
-        """
-
-        amz_listing = self.dbsession.query(AmazonListing).filter_by(id=op.listing_id).one()
-        params = op.params
-
-        self.ItemLookup(op)
-
+        # Fall back on GetLowestOfferListings if necessary
         if amz_listing.price is None:
             r = self.mwsapi.GetLowestOfferListingsForASIN(priority=op.priority,
                                                           MarketplaceId=self.mwsapi.api.market_id(),
@@ -481,6 +536,22 @@ class OperationsManager(QObject):
                 amz_listing.price = result['price']
                 amz_listing.hasprime = result['prime']
 
+        # Maybe create a fees request
+        if 'feesif' in params \
+                and 'priceratio' in params['feesif'] \
+                and amz_listing.price is not None:
+
+            maxratio = 0
+            for link in self.dbsession.query(LinkedProducts).filter_by(amz_listing_id=amz_listing.id):
+                maxratio = max(amz_listing.unit_price / link.vnd_listing.unit_price, maxratio)
+
+            if maxratio >= float(params['feesif']['priceratio']):
+                op.message = 'Getting FBA fees...'
+                fees_op = Operation.GetMyFeesEstimate(listing_id=amz_listing.id,
+                                                      priority=op.priority,
+                                                      params={'price': amz_listing.price})
+                self.dbsession.add(fees_op)
+
         if 'log' in params and params['log'] == True:
             self.dbsession.add(AmzProductHistory(amz_listing_id=amz_listing.id,
                                                  salesrank=amz_listing.salesrank,
@@ -489,9 +560,9 @@ class OperationsManager(QObject):
                                                  offers=amz_listing.offers,
                                                  timestamp=func.now()))
 
-        if 'repeat' in params:
+        if 'repeat' in params and params['repeat'] > 0:
             op.scheduled = arrow.utcnow().replace(minutes=params['repeat']).naive
         else:
-            op.completed = True
+            op.complete = True
 
 

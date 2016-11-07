@@ -1,6 +1,27 @@
-from PyQt5.QtCore import *
-from PyQt5.QtWidgets import *
-from PyQt5.QtGui import *
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QItemDelegate, QStyledItemDelegate, QComboBox, QLineEdit, QDoubleSpinBox, QAbstractSpinBox
+from PyQt5.QtGui import QValidator, QDoubleValidator
+
+
+class ReadOnlyDelegate(QStyledItemDelegate):
+
+    def __init__(self, readonly=True, parent=None):
+        super(QStyledItemDelegate, self).__init__(parent=parent)
+        self._readonly = True
+
+    @property
+    def readonly(self):
+        return self._readonly
+
+    @readonly.setter
+    def readonly(self, value):
+        self._readonly = bool(value)
+
+    def createEditor(self, parent, options, index):
+        if self._readonly:
+            return None
+        else:
+            return super(ReadOnlyDelegate, self).createEditor(parent, options, index)
 
 
 class CategoryDelegate(QStyledItemDelegate):
@@ -109,9 +130,11 @@ class ValidatorDelegate(QStyledItemDelegate):
 
 class NumericDelegate(QStyledItemDelegate):
 
-    def __init__(self, precision=2, parent=None):
+    def __init__(self, precision=2, readonly=False, parent=None):
         super(NumericDelegate, self).__init__(parent)
         self._precision = precision
+        self._readonly = readonly
+        # self._validator = QDoubleValidator(0-float('inf'), float('inf'), precision, parent)
 
     @property
     def precision(self):
@@ -119,11 +142,40 @@ class NumericDelegate(QStyledItemDelegate):
 
     @precision.setter
     def precision(self, value):
-        self._precision = value
+        self._precision = int(value)
+
+    @property
+    def readonly(self):
+        return self._readonly
+
+    @readonly.setter
+    def readonly(self, value):
+        self._readonly = bool(value)
 
     def displayText(self, value, locale):
         fstr = '{:,.%sf}' % self._precision
         return fstr.format(value)
+
+    def createEditor(self, parent, options, index):
+        if self.readonly:
+            return None
+
+        editor = QDoubleSpinBox(parent)
+        editor.setDecimals(self._precision)
+        editor.setRange(-float('inf'), +float('inf'))
+        return editor
+
+    def setEditorData(self, editor, index):
+        try:
+            value = float(index.data(Qt.EditRole))
+        except ValueError:
+            value = 0
+
+        editor.setValue(value)
+
+    def setModelData(self, editor, model, index):
+        value = editor.value()
+        model.setData(index, value)
 
 
 class IntegerDelegate(NumericDelegate):
@@ -134,8 +186,8 @@ class IntegerDelegate(NumericDelegate):
 
 class CurrencyDelegate(NumericDelegate):
 
-    def __init__(self, prefix='$', parent=None):
-        super(CurrencyDelegate, self).__init__(precision=2, parent=parent)
+    def __init__(self, prefix='$', readonly=False, parent=None):
+        super(CurrencyDelegate, self).__init__(precision=2, readonly=readonly, parent=parent)
         self._prefix = prefix
 
     @property
@@ -159,3 +211,15 @@ class PercentDelegate(NumericDelegate):
         return '%' + super(PercentDelegate, self).displayText(100 * value, locale)
 
 
+class DataMapperDelegate(QItemDelegate):
+
+    def setEditorData(self, widget, index):
+        data = index.data()
+
+        if isinstance(widget, QAbstractSpinBox):
+            if not data:
+                widget.setValue(0)
+            else:
+                widget.setValue(data)
+        elif isinstance(widget, QLineEdit):
+            widget.setText(str(data))

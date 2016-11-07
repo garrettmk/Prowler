@@ -64,6 +64,19 @@
     <string>Remove from list</string>
    </property>
   </action>
+  <action name="actionDelete_list">
+   <property name="icon">
+    <iconset>
+     <normalon>icons/multiply-1.png</normalon>
+    </iconset>
+   </property>
+   <property name="text">
+    <string>Delete list</string>
+   </property>
+   <property name="toolTip">
+    <string>Delete list</string>
+   </property>
+  </action>
  </widget>
  <resources/>
  <connections/>

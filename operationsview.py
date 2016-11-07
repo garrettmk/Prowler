@@ -41,7 +41,7 @@ class OperationsView(AbstractView, Ui_operationsView):
         for op_name in self.opsman.supported_ops:
             num = self.dbsession.query(Operation).\
                                  filter(and_(Operation.complete == False, Operation.error == False)).\
-                                 filter(Operation.operation.like('%s%%' % op_name)).\
+                                 filter(Operation.operation == op_name).\
                                  count()
 
             # est_time += num * self.opsman.mwsapi.throttle_limits(op_name).restore_rate
@@ -87,7 +87,7 @@ class OperationsView(AbstractView, Ui_operationsView):
 
         # Add to the operation table
         for row in query:
-            op = Operation.GenericOperation(name=dialog.operation,
+            op = Operation.GenericOperation(operation=dialog.operation,
                                             params=dialog.params,
                                             listing_id=row.id)
             self.dbsession.add(op)

@@ -77,7 +77,7 @@ class Listing(Base):
     price = Column(Float)
     url = Column(String)
 
-    updated = Column(DateTime)
+    updated = Column(DateTime, default=func.now())
 
     __table_args__ = (UniqueConstraint('vendor_id', 'sku', name='vendor_sku_key'), {})
     __mapper_args__ = {'polymorphic_identity': 'listing',
@@ -230,67 +230,56 @@ class Operation(Base):
     priority = Column(Integer, nullable=False, default=0)
 
     operation = Column(String)
+    param_string = Column(String)
 
     scheduled = Column(DateTime, default=func.now())
     complete = Column(Boolean, default=False)
     error = Column(Boolean, default=False)
     message = Column(String)
 
-    listing_id = Column(String, ForeignKey(Listing.id, ondelete='CASCADE'), nullable=False)
+    listing_id = Column(String, ForeignKey(Listing.id, ondelete='CASCADE'))
     listing = relationship(Listing)
-
-    # Some regexes used for operation string parsing
-    re_opname = re.compile(r'(\w+)')
-    re_params = re.compile(r'\(([^)]+)\)')
 
     def __repr__(self):
         return "<%s(operation='%s', listing_id=%s, priority=%s, scheduled=%s)>" % \
                (__class__, self.operation, self.listing_id, self.priority, self.scheduled)
 
     @property
-    def operation_name(self):
-        """Return the name of this operation."""
-        match = self.re_opname.match(self.operation)
-        if match:
-            return match.group(1)
-        else:
-            return None
-
-    @property
     def params(self):
-        match = self.re_params.search(self.operation)
-        if match is None:
-            return {}
+        if self.param_string:
+            return json.loads(self.param_string)
         else:
-            param_string = match.group(1)
-
-        params = json.loads(param_string)
-        return params
+            return {}
 
     @staticmethod
-    def GenericOperation(name, params=None, **kwargs):
-        opstring = '%s(%s)' % (name, json.dumps(params) if params else '')
-        return Operation(operation=opstring, **kwargs)
+    def GenericOperation(operation, params=None, **kwargs):
+        return Operation(operation=operation,
+                         param_string=json.dumps(params) if params else '',
+                         **kwargs)
 
     @staticmethod
     def FindAmazonMatches(params=None, **kwargs):
-        opstring = 'FindAmazonMatches(%s)' % json.dumps(params) if params else ''
-        return Operation(operation=opstring, **kwargs)
+        return Operation.GenericOperation(operation='FindAmazonMatches',
+                                          params=params,
+                                          **kwargs)
 
     @staticmethod
     def GetMyFeesEstimate(params=None, **kwargs):
-        opstring = 'GetMyFeesEstimate(%s)' % json.dumps(params) if params else ''
-        return Operation(operation=opstring, **kwargs)
-
-    @staticmethod
-    def ItemLookup(params=None, **kwargs):
-        opstring = 'ItemLookup(%s)' % json.dumps(params) if params else ''
-        return Operation(operation=opstring, **kwargs)
+        return Operation.GenericOperation(operation='GetMyFeesEstimate',
+                                          params=params,
+                                          **kwargs)
 
     @staticmethod
     def UpdateAmazonListing(params=None, **kwargs):
-        opstring = 'UpdateAmazonListing(%s)' % json.dumps(params) if params else ''
-        return Operation(operation=opstring, **kwargs)
+        return Operation.GenericOperation(operation='UpdateAmazonListing',
+                                          params=params,
+                                          **kwargs)
+
+    @staticmethod
+    def SearchAmazon(params=None, **kwargs):
+        return Operation.GenericOperation(operation='SearchAmazon',
+                                          params=params,
+                                          **kwargs)
 
 
 

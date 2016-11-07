@@ -1,17 +1,24 @@
+import arrow
 import csv
+
 from collections import OrderedDict
 from itertools import chain
 
-import arrow
 from PyQt5.QtCore import QDateTime
 from PyQt5.QtWidgets import QDialog, QFileDialog, QDialogButtonBox
 from PyQt5.QtWidgets import QWidget
+
 from database import *
+
 from selectlist_ui import Ui_selectListDialog
 from importcsv_ui import Ui_ImportCSV
 from listmatchingproducts_params_ui import Ui_listMatchingProductsParams
 from opsdialog_ui import Ui_opsDialog
 from progressdialog_ui import Ui_progressDialog
+from watch_product_dialog_ui import Ui_watchProductDialog
+from vnd_product_dialog_ui import Ui_vndProductDialog
+from search_amazon_dialog_ui import Ui_searchAmazonDialog
+
 
 class ImportCSVDialog(QDialog, Ui_ImportCSV):
 
@@ -136,6 +143,11 @@ class ListMatchingProductsParameters(QWidget, Ui_listMatchingProductsParams):
         super(ListMatchingProductsParameters, self).__init__(parent=parent)
         self.setupUi(self)
 
+        session = Session()
+
+        list_names = [result.name for result in session.query(List.name).all()]
+        self.listNamesBox.addItems(list_names)
+
     @property
     def params(self):
         params = {}
@@ -143,6 +155,9 @@ class ListMatchingProductsParameters(QWidget, Ui_listMatchingProductsParams):
         params['linkif'] = {'conf': self.confidenceBox.value()}
         params['priceif'] = {'salesrank': self.salesRankBox.value()}
         params['feesif'] = {'priceratio': '%.2f' % (self.differenceBox.value() / 100)}
+
+        if self.addToListCheck.isChecked() and self.listNamesBox.currentText():
+            params['addtolist'] = self.listNamesBox.currentText()
 
         return params
 
@@ -262,13 +277,121 @@ class OperationDialog(QDialog, Ui_opsDialog):
 
 class SelectListDialog(QDialog, Ui_selectListDialog):
 
-    def __init__(self, list_names=None, parent=None):
+    def __init__(self, list_names=None, readonly=False, parent=None):
         super(SelectListDialog, self).__init__(parent=parent)
         self.setupUi(self)
 
         if list_names:
             self.listNameBox.addItems(list_names)
 
+        self.listNameBox.setEditable(readonly)
+
     @property
     def list_name(self):
         return self.listNameBox.currentText()
+
+
+class WatchProductDialog(QDialog, Ui_watchProductDialog):
+
+    def __init__(self, period=None, parent=None):
+        super(WatchProductDialog, self).__init__(parent=parent)
+        self.setupUi(self)
+
+        if period:
+            self.periodBox.setValue(period)
+
+    @property
+    def period(self):
+        return self.periodBox.value()
+
+    @period.setter
+    def period(self, value):
+        self.periodBox.setValue(value)
+
+
+class VndProductDialog(QDialog, Ui_vndProductDialog):
+
+    def __init__(self, listing=None, parent=None):
+        super(VndProductDialog, self).__init__(parent=parent)
+        self.setupUi(self)
+
+        self.dbsession = Session()
+
+        # Connections
+        self.titleLine.textChanged.connect(self.maybe_enable_ok)
+        self.brandLine.textChanged.connect(self.maybe_enable_ok)
+        self.modelLine.textChanged.connect(self.maybe_enable_ok)
+        self.skuLine.textChanged.connect(self.maybe_enable_ok)
+        self.vendorBox.currentTextChanged.connect(self.maybe_enable_ok)
+
+        # Initialize values
+        self.titleLine.setText(getattr(listing, 'title', ''))
+        self.urlLine.setText(getattr(listing, 'url', ''))
+        self.brandLine.setText(getattr(listing, 'brand', ''))
+        self.modelLine.setText(getattr(listing, 'model', ''))
+        self.skuLine.setText(getattr(listing, 'sku', ''))
+        self.upcLine.setText(getattr(listing, 'upc', ''))
+        self.priceBox.setValue(getattr(listing, 'price', 0))
+        self.quantityBox.setValue(getattr(listing, 'quantity', 1))
+
+        vendor_names = [result.name for result in self.dbsession.query(Vendor.name).\
+                                                                 filter(Vendor.name != 'Amazon').\
+                                                                 all()]
+        self.vendorBox.addItems(vendor_names)
+
+        if hasattr(listing, 'vendor'):
+            self.vendorBox.setCurrentText(listing.vendor.name)
+
+    def maybe_enable_ok(self):
+        if self.titleLine.text() \
+            and self.brandLine.text() \
+            and self.modelLine.text() \
+            and self.skuLine.text() \
+            and self.vendorBox.currentText():
+
+            self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(True)
+        else:
+            self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(False)
+
+    def get_listing(self):
+        listing = VendorListing(sku=self.skuLine.text(),
+                                title=self.titleLine.text(),
+                                brand=self.brandLine.text(),
+                                model=self.modelLine.text(),
+                                upc=self.upcLine.text(),
+                                quantity=self.quantityBox.value(),
+                                price=self.priceBox.value())
+        return listing
+
+    @property
+    def vendor_name(self):
+        return self.vendorBox.currentText()
+
+
+class SearchAmazonDialog(QDialog, Ui_searchAmazonDialog):
+
+    def __init__(self, parent=None):
+        super(SearchAmazonDialog, self).__init__(parent=parent)
+        self.setupUi(self)
+
+        self.dbsession = Session()
+
+        self.searchLine.textChanged.connect(self.maybe_enable_ok)
+        self.listBox.currentTextChanged.connect(self.maybe_enable_ok)
+
+        list_names = [result.name for result in self.dbsession.query(List.name).filter_by(is_amazon=True).all()]
+        self.listBox.addItems(list_names)
+
+        self.maybe_enable_ok()
+
+    def maybe_enable_ok(self):
+        enabled = bool(self.searchLine.text()) and bool(self.listBox.currentText())
+        self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(enabled)
+
+    @property
+    def list_name(self):
+        return self.listBox.currentText()
+
+    @property
+    def search_terms(self):
+        return self.searchLine.text()
