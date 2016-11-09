@@ -5,7 +5,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy import create_engine, event
 from sqlalchemy import Table, Column, Integer, Float, String, DateTime, Boolean
 from sqlalchemy import ForeignKey, ForeignKeyConstraint, UniqueConstraint
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 
 from sqlalchemy.sql import label
 from sqlalchemy.ext.declarative import declarative_base
@@ -14,6 +14,18 @@ from sqlalchemy.orm import sessionmaker, scoped_session, relationship, backref
 from sqlalchemy.orm.exc import ObjectDeletedError, NoResultFound
 
 from sqlalchemy.sql.functions import func
+
+from PyQt5.QtSql import QSqlQuery
+
+
+# Helper function to convert SQLAlchemy queries into QSqlQuery objects
+def saquery_to_qtquery(sa_query):
+    statement = sa_query.statement.compile()
+    qtquery = QSqlQuery()
+    qtquery.prepare(str(statement))
+    for name, value in statement.params.items():
+        qtquery.bindValue(':' + name, value)
+    return qtquery
 
 
 # Make sure foreign keys are enabled
@@ -43,8 +55,8 @@ class Vendor(Base):
     __tablename__ = 'vendors'
 
     id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False, unique=True)
-    url = Column(String)
+    name = Column(String(collation='NOCASE'), nullable=False, unique=True)
+    url = Column(String(collation='NOCASE'))
 
     tax_rate = Column(Float, default=0)
     ship_rate = Column(Float, default=0)
@@ -61,11 +73,11 @@ class Listing(Base):
 
     vendor_id = Column(Integer, ForeignKey(Vendor.id, ondelete='CASCADE'), nullable=False)
     vendor = relationship(Vendor)
-    sku = Column(String, nullable=False)
+    sku = Column(String(collation='NOCASE'), nullable=False)
 
     title = Column(String)
-    brand = Column(String)
-    model = Column(String)
+    brand = Column(String(collation='NOCASE'))
+    model = Column(String(collation='NOCASE'))
     upc = Column(Integer)
 
     height = Column(Float)
@@ -75,7 +87,7 @@ class Listing(Base):
 
     quantity = Column(Integer)
     price = Column(Float)
-    url = Column(String)
+    url = Column(String(collation='NOCASE'))
 
     updated = Column(DateTime, default=func.now())
 
@@ -99,7 +111,7 @@ class AmazonCategory(Base):
     __tablename__ = 'amz_categories'
 
     id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)
+    name = Column(String(collation='NOCASE'), nullable=False)
     scale = Column(Integer, default=1)
     product_category_id = Column(String)
 
@@ -111,7 +123,7 @@ class AmazonMerchant(Base):
     __tablename__ = 'merchants'
 
     id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False, unique=True)
+    name = Column(String(collation='NOCASE'), nullable=False, unique=True)
 
     def __repr__(self):
         return "<%s(name='%s')>" % (__class__, self.name)
@@ -142,6 +154,7 @@ class AmzProductHistory(Base):
 
     id = Column(Integer, primary_key=True)
     amz_listing_id = Column(Integer, ForeignKey(AmazonListing.id, ondelete='CASCADE'))
+    amz_listing = relationship(AmazonListing, backref='history')
 
     price = Column(Float)
     salesrank = Column(Integer)
@@ -250,6 +263,10 @@ class Operation(Base):
             return json.loads(self.param_string)
         else:
             return {}
+
+    @params.setter
+    def params(self, values):
+        self.param_string = json.dumps(values)
 
     @staticmethod
     def GenericOperation(operation, params=None, **kwargs):

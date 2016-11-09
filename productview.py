@@ -9,7 +9,7 @@ from delegates import DataMapperDelegate
 
 from database import *
 
-from abstractview import AbstractView, saquery_to_qtquery
+from abstractview import AbstractView
 from productview_ui import Ui_productView
 from product_links_ui import Ui_listingLinks
 from dialogs import SelectListDialog
@@ -17,14 +17,14 @@ from dialogs import SelectListDialog
 
 class ProductDetailsWidget(QWidget):
     """Base class for the AmzProductDetailsWidget and VndProductDetailsWidget classes. Doesn't have it's own
-    UI, but depends on certain UI elements (like self.titleLine) to be available. Make sure that self.setupUi()
-    is called by inherited classes before the call to super().__init__()"""
+    UI, but depends on certain UI elements (like self.titleLine) to be available.
+    """
 
     def __init__(self, parent=None):
         super(ProductDetailsWidget, self).__init__(parent=parent)
         self.setupUi(self)
 
-        self.sel_listing = None
+        self.listing = None
         self.dbsession = Session()
 
         # Set up the model
@@ -62,7 +62,7 @@ class ProductDetailsWidget(QWidget):
 
     def set_listing(self, listing):
         """Set the widget's currently selected listing."""
-        self.sel_listing = listing
+        self.listing = listing
         listing_id = listing.id if listing else None
 
         listing_type = VendorListing if isinstance(listing, VendorListing) else AmazonListing
@@ -79,33 +79,33 @@ class ProductDetailsWidget(QWidget):
 
     def open_listing_url(self):
         """Open the listing's URL in a separate window."""
-        if self.sel_listing is None or self.sel_listing.url is None:
+        if self.listing is None or self.listing.url is None:
             QMessageBox.information(self, 'Error', 'No URL available.')
             return
 
-        webbrowser.open(self.sel_listing.url)
+        webbrowser.open(self.listing.url)
 
     def google_listing(self):
         """Search Google for the listing's brand and model."""
-        if self.sel_listing is None \
-            or self.sel_listing.brand is None \
-            or self.sel_listing.model is None:
+        if self.listing is None \
+            or self.listing.brand is None \
+            or self.listing.model is None:
             QMessageBox.information(self, 'Error', 'No listing selected, or required information unavailable.')
             return
 
-        q = '{} {}'.format(self.sel_listing.brand, self.sel_listing.model).replace(' ', '+')
+        q = '{} {}'.format(self.listing.brand, self.listing.model).replace(' ', '+')
         url = 'http://www.google.com/?gws_rd=ssl#q={}'.format(q)
 
         webbrowser.open(url)
 
     def upc_lookup(self):
         """Open a UPC lookup in a separate window."""
-        if self.sel_listing is None \
-            or self.sel_listing.upc is None:
+        if self.listing is None \
+            or self.listing.upc is None:
             QMessageBox.information(self, 'Error', 'No listing selected, or no UPC code available.')
             return
 
-        url = 'http://www.upcitemdb.com/upc/%s' % self.sel_listing.upc
+        url = 'http://www.upcitemdb.com/upc/%s' % self.listing.upc
         webbrowser.open(url)
 
     def delete_listing(self):
@@ -133,7 +133,7 @@ class ProductLinksWidget(QWidget, Ui_listingLinks):
         self.linksTable.setContextMenuPolicy(Qt.CustomContextMenu)
 
         self.linksTable.customContextMenuRequested.connect(self.context_menu)
-        self.linksTable.selectionModel().currentRowChanged.connect(self.on_selection_change)
+        self.linksTable.selectionModel().selectionChanged.connect(self.on_selection_change)
 
         # Populate
         self.set_listing(None)
@@ -148,26 +148,47 @@ class ProductLinksWidget(QWidget, Ui_listingLinks):
         self.context_menu.addActions([self.actionDelete_link])
         self.actionDelete_link.triggered.connect(self.delete_link)
 
-    def set_listing(self, listing):
-        """Set's the root listing. Overridden by subclasses."""
+    def set_listing(self, listing=None):
+        """Set's the root listing and populates the links table."""
         self.parent_listing = listing
         self.sel_listing = None
 
-    def on_selection_change(self, current, previous):
-        """Update self.sel_listing"""
-        id_idx = self.linksModel.index(current.row(), self.linksModel.fieldIndex('id'))
-        listing_id = id_idx.data(Qt.DisplayRole)
+        sa_query = self.generate_query(parent_listing=listing)
 
-        self.sel_listing = self.dbsession.query(Listing).filter_by(id=listing_id).first()
+        qt_query = saquery_to_qtquery(sa_query)
+        qt_query.exec_()
+        self.linksModel.setQuery(qt_query)
+        self.linksModel.select()
+
+    def generate_query(self, parent_listing):
+        """Return a SQLAlchemy query object used to populate the table. Provided by subclasses."""
+
+    def on_selection_change(self, selected, deselected):
+        """Update self.sel_listing"""
+        if selected.indexes():
+            id_idx = self.linksModel.index(selected.indexes()[0].row(), self.linksModel.fieldIndex('id'))
+            listing_id = id_idx.data()
+
+            self.sel_listing = self.dbsession.query(Listing).filter_by(id=listing_id).first()
+        else:
+            self.sel_listing = None
+
         self.selection_changed.emit()
 
     def context_menu(self, point):
+        """Show the table's context menu."""
+        self.maybe_enable_context_actions()
         self.actionDelete_link.setEnabled(bool(self.sel_listing))
 
         point = self.linksTable.viewport().mapToGlobal(point)
         self.context_menu.popup(point)
 
+    def maybe_enable_context_actions(self):
+        """Enable or disable context menu actions prior to showing the menu."""
+        self.actionDelete_link.setEnabled(bool(self.sel_listing))
+
     def delete_link(self):
+        """Delete the selected link and refresh the table."""
         if isinstance(self.parent_listing, AmazonListing):
             sel_link = self.dbsession.query(LinkedProducts).filter_by(amz_listing_id=self.parent_listing.id,
                                                                       vnd_listing_id=self.sel_listing.id).\

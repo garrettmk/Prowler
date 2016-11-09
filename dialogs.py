@@ -4,9 +4,10 @@ import csv
 from collections import OrderedDict
 from itertools import chain
 
-from PyQt5.QtCore import QDateTime
-from PyQt5.QtWidgets import QDialog, QFileDialog, QDialogButtonBox
+from PyQt5.QtCore import Qt, QDateTime
+from PyQt5.QtWidgets import QDialog, QFileDialog, QDialogButtonBox, QMessageBox, QHeaderView
 from PyQt5.QtWidgets import QWidget
+from PyQt5.QtSql import QSqlTableModel
 
 from database import *
 
@@ -18,6 +19,7 @@ from progressdialog_ui import Ui_progressDialog
 from watch_product_dialog_ui import Ui_watchProductDialog
 from vnd_product_dialog_ui import Ui_vndProductDialog
 from search_amazon_dialog_ui import Ui_searchAmazonDialog
+from search_listings_dialog_ui import Ui_searchListingsDialog
 
 
 class ImportCSVDialog(QDialog, Ui_ImportCSV):
@@ -48,7 +50,7 @@ class ImportCSVDialog(QDialog, Ui_ImportCSV):
 
         self.fileLine.setText(filename)
 
-        req_fields = ['Brand', 'Model', 'Quantity', 'Price']
+        req_fields = ['brand', 'model', 'quantity', 'price']
 
         with open(filename) as file:
             reader = csv.DictReader(file)
@@ -284,7 +286,7 @@ class SelectListDialog(QDialog, Ui_selectListDialog):
         if list_names:
             self.listNameBox.addItems(list_names)
 
-        self.listNameBox.setEditable(readonly)
+        self.listNameBox.setEditable(not readonly)
 
     @property
     def list_name(self):
@@ -316,6 +318,7 @@ class VndProductDialog(QDialog, Ui_vndProductDialog):
         self.setupUi(self)
 
         self.dbsession = Session()
+        self.listing = listing
 
         # Connections
         self.titleLine.textChanged.connect(self.maybe_enable_ok)
@@ -323,6 +326,7 @@ class VndProductDialog(QDialog, Ui_vndProductDialog):
         self.modelLine.textChanged.connect(self.maybe_enable_ok)
         self.skuLine.textChanged.connect(self.maybe_enable_ok)
         self.vendorBox.currentTextChanged.connect(self.maybe_enable_ok)
+        self.accepted.connect(self.update_listing)
 
         # Initialize values
         self.titleLine.setText(getattr(listing, 'title', ''))
@@ -345,27 +349,45 @@ class VndProductDialog(QDialog, Ui_vndProductDialog):
     def maybe_enable_ok(self):
         if self.titleLine.text() \
             and self.brandLine.text() \
-            and self.modelLine.text() \
-            and self.skuLine.text() \
-            and self.vendorBox.currentText():
+                and self.modelLine.text() \
+                    and self.skuLine.text() \
+                        and self.vendorBox.currentText():
 
-            self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(True)
+            prior = self.dbsession.query(VendorListing.id).\
+                                   join(Vendor).\
+                                   filter(VendorListing.sku == self.skuLine.text(),
+                                          Vendor.name == self.vendorBox.currentText()).\
+                                   first()
+
+            if prior and (self.listing is None or self.listing.id != prior.id):
+                decision = False
+            else:
+                decision = True
         else:
-            self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(False)
+            decision = False
 
-    def get_listing(self):
-        listing = VendorListing(sku=self.skuLine.text(),
-                                title=self.titleLine.text(),
-                                brand=self.brandLine.text(),
-                                model=self.modelLine.text(),
-                                upc=self.upcLine.text(),
-                                quantity=self.quantityBox.value(),
-                                price=self.priceBox.value())
-        return listing
+        self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(decision)
 
-    @property
-    def vendor_name(self):
-        return self.vendorBox.currentText()
+    def update_listing(self):
+        # Get or create the vendor
+        vendor = self.dbsession.query(Vendor).filter_by(name=self.vendorBox.currentText()).first()
+        if vendor is None:
+            vendor = Vendor(name=self.vendorBox.currentText())
+
+        if self.listing is None:
+            self.listing = VendorListing()
+            self.dbsession.add(self.listing)
+
+        self.listing.vendor = vendor
+        self.listing.sku = self.skuLine.text()
+        self.listing.title = self.titleLine.text()
+        self.listing.brand = self.brandLine.text()
+        self.listing.model = self.modelLine.text()
+        self.listing.upc = self.upcLine.text()
+        self.listing.quantity = self.quantityBox.value()
+        self.listing.price = self.priceBox.value()
+
+        self.dbsession.commit()
 
 
 class SearchAmazonDialog(QDialog, Ui_searchAmazonDialog):
@@ -395,3 +417,87 @@ class SearchAmazonDialog(QDialog, Ui_searchAmazonDialog):
     @property
     def search_terms(self):
         return self.searchLine.text()
+
+
+class SearchListingsDialog(QDialog, Ui_searchListingsDialog):
+
+    def __init__(self, amazon=False, parent=None):
+        super(SearchListingsDialog, self).__init__(parent=parent)
+        self.setupUi(self)
+
+        self.amazon = amazon
+        self.dbsession = Session()
+
+        # Populate the sources combo box
+        condition = Vendor.name == 'Amazon' if amazon else Vendor.name != 'Amazon'
+
+        vendor_names = [result.name for result in self.dbsession.query(Vendor.name).filter(condition)]
+        list_names = [result.name for result in self.dbsession.query(List.name).filter(List.is_amazon == amazon)]
+
+        if not amazon:
+            vendor_names.insert(0, 'All Vendor products')
+
+        self.sourceBox.addItems(vendor_names)
+        self.sourceBox.addItems(list_names)
+
+        # Set up the main table and model
+        self.resultsModel = QSqlTableModel(self)
+        self.resultsTable.setModel(self.resultsModel)
+
+        # Populate the table headers
+        self.search()
+
+        # More table set up
+        self.resultsTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.resultsTable.horizontalHeader().setSectionResizeMode(self.resultsModel.fieldIndex('Title'), QHeaderView.Stretch)
+        self.resultsTable.horizontalHeader().setSectionHidden(self.resultsModel.fieldIndex('id'), True)
+
+        # Connections
+        self.searchButton.clicked.connect(self.search)
+
+    def search(self):
+        keywords = self.keywordsLine.text() or 'abcdefghijklmnop123456789'
+        keywords = keywords.split()
+
+        brand_clauses = or_(*[Listing.brand.contains(term) for term in keywords])
+        model_clauses = or_(*[Listing.model.contains(term) for term in keywords])
+        title_clauses = or_(*[Listing.title.contains(term) for term in keywords])
+
+        query = self.dbsession.query(Listing.id.label('id'),
+                                     Vendor.name.label('Vendor'),
+                                     Listing.sku.label('SKU'),
+                                     Listing.brand.label('Brand'),
+                                     Listing.model.label('Model'),
+                                     Listing.title.label('Title')).\
+                                filter(Vendor.id == Listing.vendor_id,
+                                       or_(brand_clauses, model_clauses, title_clauses))
+
+        source_name = self.sourceBox.currentText()
+        if source_name == 'All Vendor products':
+            query = query.filter(Vendor.id > 0)
+        else:
+            # Is it a vendor name?
+            vendor_id = self.dbsession.query(Vendor.id).filter_by(name=source_name).scalar()
+            if vendor_id:
+                query = query.filter_by(vendor_id=vendor_id)
+            else:
+                # Is it a list name?
+                list_id = self.dbsession.query(List.id).filter_by(name=source_name).scalar()
+                if list_id:
+                    query = query.join(ListMembership).filter_by(list_id=list_id)
+
+        qt_query = saquery_to_qtquery(query)
+        qt_query.exec_()
+        self.resultsModel.setQuery(qt_query)
+        self.resultsModel.select()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            event.accept()
+            self.search()
+
+    @property
+    def selected_ids(self):
+        selection = self.resultsTable.selectionModel().selectedRows()
+        return [idx.data() for idx in selection]
+

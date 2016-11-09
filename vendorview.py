@@ -9,15 +9,14 @@ from PyQt5.QtSql import QSqlTableModel
 
 from database import *
 
-from abstractview import saquery_to_qtquery
 from productview import ProductView, ProductDetailsWidget, ProductLinksWidget
 from vnd_listing_details_ui import Ui_vendorListingDetails
-from vnd_listing_links_ui import Ui_vndListingLinks
 
 from dialogs import ImportCSVDialog, ProgressDialog
 
 
 class VndProductDetailsWidget(ProductDetailsWidget, Ui_vendorListingDetails):
+    """A subclass of ProductDetailsWidget, specialize to show VendorListing details."""
 
     def __init__(self, parent=None):
         super(VndProductDetailsWidget, self).__init__(parent=parent)
@@ -29,7 +28,7 @@ class VndProductDetailsWidget(ProductDetailsWidget, Ui_vendorListingDetails):
     def set_listing(self, listing):
         super(VndProductDetailsWidget, self).set_listing(listing)
 
-        vnd_name = self.sel_listing.vendor.name if self.sel_listing else ''
+        vnd_name = self.listing.vendor.name if self.listing else ''
         self.vendorLine.setText(vnd_name)
 
     def lines_home(self):
@@ -39,19 +38,19 @@ class VndProductDetailsWidget(ProductDetailsWidget, Ui_vendorListingDetails):
 
 
 class VndProductLinksWidget(ProductLinksWidget):
+    """A subclass of ProductLinksWidget, specialized to show AmazonListings linked to a parent VendorListing"""
 
     def __init__(self, parent=None):
         super(VndProductLinksWidget, self).__init__(parent=parent)
         # setupUi() is called by the parent class
 
-    def set_listing(self, listing):
-        super(VndProductLinksWidget, self).set_listing(listing)
-
-        listing_id = listing.id if listing else None
+    def generate_query(self, parent_listing):
+        """Return the SQLAlchemy query used to populate the table."""
+        parent_id = parent_listing.id if parent_listing else None
 
         stmt = self.dbsession.query(LinkedProducts.confidence,
                                     AmazonListing).\
-                              filter(LinkedProducts.vnd_listing_id == listing_id,
+                              filter(LinkedProducts.vnd_listing_id == parent_id,
                                      LinkedProducts.amz_listing_id == AmazonListing.id).\
                               subquery()
 
@@ -61,12 +60,7 @@ class VndProductLinksWidget(ProductLinksWidget):
                                      stmt.c.title.label('Title'),
                                      stmt.c.price.label('Price'),
                                      stmt.c.quantity.label('Quantity'))
-
-        qt_query = saquery_to_qtquery(query)
-        qt_query.exec_()
-        self.linksModel.setQuery(qt_query)
-        self.linksModel.select()
-
+        return query
 
 class VendorView(ProductView):
 
@@ -200,7 +194,7 @@ class VendorView(ProductView):
                     dialog.status_text = 'Importing row {} of {}...'.format(reader.line_num - startrow, endrow - startrow)
                     QCoreApplication.processEvents()
 
-                    sku = row.get('SKU') or vendorname[:10].replace(' ', '') + str(reader.line_num)
+                    sku = row.get('sku') or vendorname[:10].replace(' ', '') + str(reader.line_num)
                     product = self.dbsession.query(VendorListing).filter_by(vendor_id=vendor.id, sku=sku).first()
                     if product is None:
                         product = VendorListing(vendor=vendor, sku=sku)
@@ -213,12 +207,7 @@ class VendorView(ProductView):
                     product.quantity = row.get('Quantity') or row.get('quantity')
                     product.price = row.get('Price') or row.get('price')
                     product.url = row.get('URL') or row.get('url')
-
-                    ts = row.get('Timestamp') or row.get('timestamp')
-                    if ts:
-                        product.updated = arrow.get(ts).datetime
-                    else:
-                        product.updated = arrow.utcnow().datetime
+                    product.updated = func.now()
 
             self.dbsession.commit()
 

@@ -5,7 +5,7 @@ import mwskeys, pakeys
 
 from itertools import chain
 from fuzzywuzzy import fuzz
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
 
 from responseparser import ListMatchingProductsParser, ErrorResponseParser, GetLowestOfferListingsForASINParser
 from responseparser import GetMyFeesEstimateParser, GetCompetitivePricingForASINParser, ItemLookupParser
@@ -254,18 +254,18 @@ class OperationsManager(QObject):
         except ParseError:
             msg += 'no parsable response.'
 
-        op.error = True
         op.message = msg
 
         # 400 usually means an invalid parameter
         if response.status_code in [400]:
-            pass
+            op.error = True
         # 401, 403, 404 means there was a problem with the keys, signature, or address used
         elif response.status_code in [401, 403, 404]:
             self.stop()
         # 500 or 503 usually means internal service error or throttling
         elif response.status_code in [500, 503]:
-            op.scheduled = arrow.utcnow().replace(minutes=+1).naive
+            self.stop()
+            QTimer.singleShot(5 * 60 * 1000, self.start)
 
         return True
 
@@ -502,10 +502,10 @@ class OperationsManager(QObject):
         amz_listing.offers = info['offers']
         amz_listing.price = info['price']
         amz_listing.hasprime = info['prime']
-        amz_listing.updated = arrow.utcnow().naive
+        amz_listing.updated = func.now()
 
         # Add a new merchant if necessary
-        merchant = self.dbsession.query(AmazonMerchant).filter_by(name=info['merchant']).first()
+        merchant = self.dbsession.query(AmazonMerchant).filter_by(name=info['merchant'] or 'N/A').first()
         if merchant:
             amz_listing.merchant_id = merchant.id
         else:
@@ -556,6 +556,7 @@ class OperationsManager(QObject):
             self.dbsession.add(AmzProductHistory(amz_listing_id=amz_listing.id,
                                                  salesrank=amz_listing.salesrank,
                                                  hasprime=amz_listing.hasprime,
+                                                 price=amz_listing.price,
                                                  merchant_id=amz_listing.merchant_id,
                                                  offers=amz_listing.offers,
                                                  timestamp=func.now()))

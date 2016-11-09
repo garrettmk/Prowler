@@ -28,7 +28,7 @@ cat1 = AmazonCategory(name='Kitchen Stuff')
 amz1.category = cat1
 
 session.add_all([vnd1, vnd2, vnd3, amz1, link1, link2])
-# session.commit()
+session.commit()
 
 def listener(session):
     for item in chain(session.new, session.dirty, session.deleted):
