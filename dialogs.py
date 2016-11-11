@@ -139,10 +139,10 @@ class ProgressDialog(QDialog, Ui_progressDialog):
         self.progressBar.setValue(value)
 
 
-class ListMatchingProductsParameters(QWidget, Ui_listMatchingProductsParams):
+class FindAmazonMatchesParams(QWidget, Ui_listMatchingProductsParams):
 
     def __init__(self, parent=None):
-        super(ListMatchingProductsParameters, self).__init__(parent=parent)
+        super(FindAmazonMatchesParams, self).__init__(parent=parent)
         self.setupUi(self)
 
         session = Session()
@@ -150,16 +150,20 @@ class ListMatchingProductsParameters(QWidget, Ui_listMatchingProductsParams):
         list_names = [result.name for result in session.query(List.name).all()]
         self.listNamesBox.addItems(list_names)
 
+        self.testMarginsCheck.stateChanged.connect(self.listNamesBox.setEnabled)
+
     @property
     def params(self):
         params = {}
 
         params['linkif'] = {'conf': self.confidenceBox.value()}
-        params['priceif'] = {'salesrank': self.salesRankBox.value()}
-        params['feesif'] = {'priceratio': '%.2f' % (self.differenceBox.value() / 100)}
 
-        if self.addToListCheck.isChecked() and self.listNamesBox.currentText():
-            params['addtolist'] = self.listNamesBox.currentText()
+        if self.testMarginsCheck.isChecked():
+            testmargins_params = {}
+            testmargins_params['salesrank'] = self.salesRankBox.value()
+            testmargins_params['list'] = self.listNamesBox.currentText()
+            testmargins_params['threshold'] = self.marginBox.value() / 100
+            params['testmargins'] = testmargins_params
 
         return params
 
@@ -179,7 +183,7 @@ class OperationDialog(QDialog, Ui_opsDialog):
         self.amz_ops['UpdateAmazonListing'] = QWidget()
 
         self.vnd_ops = OrderedDict()
-        self.vnd_ops['FindAmazonMatches'] = ListMatchingProductsParameters()
+        self.vnd_ops['FindAmazonMatches'] = FindAmazonMatchesParams()
 
         for key, widget in chain(self.amz_ops.items(), self.vnd_ops.items()):
             self.paramsStack.addWidget(widget)

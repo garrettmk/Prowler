@@ -6,7 +6,7 @@ from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor
 from PyQt5.QtWidgets import QWidget, QAbstractItemView, QDataWidgetMapper, QHeaderView, QTabWidget, QHBoxLayout
 from PyQt5.QtWidgets import QMessageBox, QStackedWidget, QItemDelegate, QLineEdit, QFrame, QMenu, QAction, QTableView
 from PyQt5.QtWidgets import QVBoxLayout, QGraphicsItem
-from PyQt5.QtSql import QSqlTableModel
+from PyQt5.QtSql import QSqlTableModel, QSqlQueryModel
 from PyQt5.QtChart import QChartView, QChart, QDateTimeAxis, QValueAxis, QLineSeries, QScatterSeries
 
 from database import *
@@ -90,6 +90,7 @@ class AmzProductDetailsWidget(ProductDetailsWidget, Ui_amzProductDetails):
             self.dbsession.add(current_watch)
 
         watch.params = {'log': True, 'repeat': watch_period}
+        watch.priority = 5
         self.dbsession.commit()
 
 
@@ -432,14 +433,19 @@ class AmzProductSourcingWidget(QWidget, Ui_amzProductSourcing):
                                     AmzPriceAndFees.prep,
                                     AmzPriceAndFees.ship,
                                     label('profit', AmzPriceAndFees.price \
-                                                    - AmzPriceAndFees.fba \
-                                                    - AmzPriceAndFees.prep \
-                                                    - AmzPriceAndFees.ship \
+                                                    - func.ifnull(AmzPriceAndFees.fba, 0) \
+                                                    - func.ifnull(AmzPriceAndFees.prep, 0) \
+                                                    - func.ifnull(AmzPriceAndFees.ship, 0) \
                                                     - vnd_cost)).\
                               filter_by(amz_listing_id=amz_id).\
                               subquery()
 
-        margin_exp = func.printf('%.2f%%', stmt.c.profit / (vnd_cost + stmt.c.prep + stmt.c.ship) * 100) if vnd_cost else func.printf('N/A')
+        if vnd_cost:
+            margin_exp = func.printf('%.2f%%', stmt.c.profit / (vnd_cost \
+                                                                + func.ifnull(stmt.c.prep, 0) \
+                                                                + func.ifnull(stmt.c.ship, 0)) * 100)
+        else:
+            margin_exp = func.printf('N/A')
 
         query = self.dbsession.query(stmt.c.id.label('id'),
                                      stmt.c.price.label('Price'),
@@ -601,6 +607,8 @@ class AmazonView(ProductView):
         self.history.set_listing(self.amz_listing)
         self.links.set_listing(self.amz_listing)
         self.sourcing.set_listing(self.amz_listing)
+
+        self.links.linksTable.selectRow(0)
 
     def link_selection_changed(self):
         self.sourcing.set_vnd_listing(self.links.sel_listing)

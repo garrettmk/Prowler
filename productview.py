@@ -233,7 +233,7 @@ class ProductView(AbstractView, Ui_productView):
         self.mainTable_context_actions = [self.actionAdd_to_list, self.actionRemove_from_list]
 
         # Default UI connections
-        self.sourceBox.currentTextChanged.connect(self.show_listings)
+        self.sourceBox.activated.connect(self.show_listings)
         self.actionAdd_to_list.triggered.connect(self.action_add_to_list)
         self.actionRemove_from_list.triggered.connect(self.remove_from_list)
         self.actionReload.triggered.connect(self.show_listings)

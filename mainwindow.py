@@ -23,10 +23,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         # Set up the database connections
         # TODO: Add some error checking
-        db = QSqlDatabase.addDatabase('QSQLITE')
-        db.setDatabaseName('prowler.db')
-        db.open()
-
         self.dbengine = create_engine('sqlite:///prowler.db')
         self.dbsession = Session(bind=self.dbengine)
 
@@ -35,6 +31,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         amazon = Vendor(id=0, name='Amazon', url='www.amazon.com')
         self.dbsession.add(self.dbsession.merge(amazon))
         self.dbsession.commit()
+
+        db = QSqlDatabase.addDatabase('QSQLITE')
+        db.setConnectOptions('QSQLITE_OPEN_READONLY')
+        db.setDatabaseName('prowler.db')
+        db.open()
 
         # Set up the operations manager
         self.opsman = OperationsManager.get_instance(self)

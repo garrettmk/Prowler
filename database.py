@@ -298,6 +298,12 @@ class Operation(Base):
                                           params=params,
                                           **kwargs)
 
+    @staticmethod
+    def TestMargins(params=None, **kwargs):
+        return Operation.GenericOperation(operation='TestMargins',
+                                          params=params,
+                                          **kwargs)
+
 
 
 

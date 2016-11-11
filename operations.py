@@ -1,11 +1,13 @@
 import arrow
+import time
 import requests
 import amazonmws as mws
 import mwskeys, pakeys
 
 from itertools import chain
 from fuzzywuzzy import fuzz
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
+from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer, QUrl, QCoreApplication, QEventLoop
+from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 from responseparser import ListMatchingProductsParser, ErrorResponseParser, GetLowestOfferListingsForASINParser
 from responseparser import GetMyFeesEstimateParser, GetCompetitivePricingForASINParser, ItemLookupParser
@@ -64,7 +66,7 @@ class OperationsManager(QObject):
             cls.__instance__ = OperationsManager(parent=parent)
         return cls.__instance__
 
-    supported_ops = ['FindAmazonMatches', 'GetMyFeesEstimate', 'UpdateAmazonListing', 'SearchAmazon']
+    supported_ops = ['TestMargins', 'FindAmazonMatches', 'GetMyFeesEstimate', 'UpdateAmazonListing', 'SearchAmazon']
 
     operation_complete = pyqtSignal(int)
     status_message = pyqtSignal(str)
@@ -72,6 +74,7 @@ class OperationsManager(QObject):
     def __init__(self, parent=None):
         super(OperationsManager, self).__init__(parent=parent)
         self.dbsession = Session()
+        self.network_manager = QNetworkAccessManager(self)
         self.scheduled = {}
         self.processing = False
         self.running = True
@@ -189,6 +192,9 @@ class OperationsManager(QObject):
         elif operation == 'SearchAmazon':
             return self.mwsapi.request_wait('ListMatchingProducts', priority)
 
+        elif operation == 'TestMargins':
+            return self.get_wait('GetMyFeesEstimate', priority)
+
         else:
             return max(self.mwsapi.request_wait(operation, priority), self.paapi.request_wait(operation, priority))
 
@@ -241,15 +247,18 @@ class OperationsManager(QObject):
 
         self.status_message.emit(status_message)
 
-    def is_error_response(self, response, op):
+    def is_error_response(self, reply, op):
         """Test if the response is an error, and take appropriate action."""
-        if response.ok:
+        status_code = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+        error = reply.error()
+
+        if status_code == 200:
             return False
 
         # Try to parse the error response, if there is one
-        msg = 'Status code %i, ' % response.status_code
+        msg = 'Status code %i, ' % status_code
         try:
-            parser = ErrorResponseParser(response.content.decode())
+            parser = ErrorResponseParser(reply.readAll().data().decode())
             msg += '%s - %s' % (parser.code, parser.message)
         except ParseError:
             msg += 'no parsable response.'
@@ -257,22 +266,108 @@ class OperationsManager(QObject):
         op.message = msg
 
         # 400 usually means an invalid parameter
-        if response.status_code in [400]:
+        if status_code in [400]:
             op.error = True
         # 401, 403, 404 means there was a problem with the keys, signature, or address used
-        elif response.status_code in [401, 403, 404]:
+        elif status_code in [401, 403, 404]:
             self.stop()
         # 500 or 503 usually means internal service error or throttling
-        elif response.status_code in [500, 503]:
+        elif status_code in [500, 503]:
             self.stop()
             QTimer.singleShot(5 * 60 * 1000, self.start)
+        # Connection reset, timed out, network session failure, etc
+        elif error in [QNetworkReply.ConnectionRefusedError,
+                       QNetworkReply.TimeoutError,
+                       QNetworkReply.ServiceUnavailableError,
+                       QNetworkReply.NetworkSessionFailedError]:
+            self.stop()
+            QTimer.singleShot(15 * 60 * 1000, self.start)
+            msg += ' Connection reset, timed out, or service unavailable. Waiting 15 minutes.'
 
         return True
 
-    # TODO: Use QNetworkAccessManager and ProcessEvents() to make network requests
     def make_request(self, *args, **kwargs):
         """Make the actual network request."""
-        return requests.request(*args, **kwargs)
+        url = QUrl(kwargs['url'])
+        request = QNetworkRequest(url)
+
+        for k, v in kwargs['headers'].items():
+            request.setRawHeader(k.encode(), v.encode())
+
+        reply = self.network_manager.sendCustomRequest(request, kwargs['method'].encode(), kwargs['data'])
+
+        while reply.isRunning():
+            QCoreApplication.processEvents(QEventLoop.AllEvents, 100)
+
+        return reply
+
+    def TestMargins(self, op):
+        """Look at the potential profit margin for a listing, based on available sources. Add the listing to a list
+        if the margin meets a minimum threshold.
+
+        Parameters:         threshold=      The minimum profit margin to be added to the list.
+                            list=           The name of the list to add matches to.
+        """
+        amz_listing = op.listing
+        params = op.params
+
+        if not amz_listing.price or not amz_listing.quantity:
+            op.complete = True
+            return
+
+        # Get the lowest vendor cost available
+        vnd_unit_cost = self.dbsession.query(func.min(VendorListing.unit_price)).\
+                                        join(LinkedProducts, LinkedProducts.vnd_listing_id == VendorListing.id).\
+                                        filter(LinkedProducts.amz_listing_id == amz_listing.id).\
+                                        scalar()
+        if vnd_unit_cost is None:
+            op.complete = True
+            return
+
+        # Test the margin based solely on cost
+        cost = vnd_unit_cost * amz_listing.quantity
+        profit = amz_listing.price - cost
+
+        if profit / cost < params['threshold']:
+            op.complete = True
+            return
+
+        # Now get fees
+        price_point = self.dbsession.query(AmzPriceAndFees).\
+                                     filter_by(amz_listing_id=amz_listing.id,
+                                               price=amz_listing.price).\
+                                     first()
+        if price_point is None:
+            price_point = AmzPriceAndFees(amz_listing=amz_listing, price=amz_listing.price)
+            self.dbsession.add(price_point)
+
+        if price_point.fba is None:
+            self.GetMyFeesEstimate(op)
+
+        fba, prep, ship = self.dbsession.query(func.ifnull(AmzPriceAndFees.fba, amz_listing.price * .25),
+                                               func.ifnull(AmzPriceAndFees.prep, 0),
+                                               func.ifnull(AmzPriceAndFees.ship, 0)).\
+                                         filter_by(amz_listing_id=amz_listing.id, price=amz_listing.price).\
+                                         first()
+
+        # Calculate the margin
+        cost = vnd_unit_cost * amz_listing.quantity + prep + ship
+        profit = amz_listing.price - cost - fba
+
+        if profit / cost < params['threshold']:
+            op.complete = True
+            return
+
+        # Add to the list
+        add_list = self.dbsession.query(List).filter_by(name=params['list']).first()
+        if add_list is None:
+            add_list = List(name=params['list'], is_amazon=True)
+            self.dbsession.add(add_list)
+            self.dbsession.flush()
+
+        self.dbsession.add(self.dbsession.merge(ListMembership(list_id=add_list.id,
+                                                               listing_id=amz_listing.id)))
+        op.complete = True
 
     def SearchAmazon(self, op):
         """Find Amazon listings based on given search terms. Add the results to a list.
@@ -286,7 +381,7 @@ class OperationsManager(QObject):
         if self.is_error_response(r, op):
             return
 
-        parser = ListMatchingProductsParser(r.content.decode())
+        parser = ListMatchingProductsParser(r.readAll().data().decode())
 
         for product in parser.get_products():
             previous_id = self.dbsession.query(AmazonListing.id).filter_by(sku=product['asin']).scalar()
@@ -331,19 +426,15 @@ class OperationsManager(QObject):
     def FindAmazonMatches(self, op):
         """Query Amazon for products matching a given listing.
 
-        Parameters:     addtolist=  Add successful matches to the named list. Creates the list
-                                    if it doesn't exist yet.
+        Parameters:     linkif:         create a link only if the conditions are met
+                            conf=       match confidence greater than or equal to the given value.
 
-                        linkif: create a link only if the conditions are met
-                            conf: match confidence greater than or equal to the given value.
-
-                        priceif: create followup operations to get pricing for matched products
-                            salesrank: sales rank less than or equal to the given value
-
-                        feesif: on pricing operations, request fees if the conditions are met
-                            priceratio: the price ratio of the matched product to the listing
-            """
-        vnd_listing = self.dbsession.query(VendorListing).filter_by(id=op.listing_id).first()
+                        testmargins:    Create a TestMargins operation if the conditions are met.
+                            salesrank=  Maximum sales rank
+                            list=       The name of the list given to TestMargins
+                            threshold=  The minimum margin threshold given to TestMargins
+        """
+        vnd_listing = op.listing
         params = op.params
 
         title = str(vnd_listing.title).replace(vnd_listing.brand, '').replace(vnd_listing.model, '').strip()
@@ -353,7 +444,7 @@ class OperationsManager(QObject):
         if self.is_error_response(r, op):
             return
 
-        parser = ListMatchingProductsParser(r.content.decode())
+        parser = ListMatchingProductsParser(r.readAll().data().decode())
 
         for product in parser.get_products():
             previous_id = self.dbsession.query(AmazonListing.id).filter_by(sku=product['asin']).scalar()
@@ -395,28 +486,15 @@ class OperationsManager(QObject):
                 link.vnd_listing_id = vnd_listing.id
                 self.dbsession.merge(link)
 
-                # Schedule a price lookup if conditions are met
-                if 'priceif' in params \
-                        and 'salesrank' in params['priceif'] \
-                        and amz_listing.salesrank \
-                        and amz_listing.salesrank <= int(params['priceif']['salesrank']):
-                    # Create the operation, and pass on the parameters for GetMyFeesEstimate
-                    fee_params = params.get('feesif')
-                    price_op = Operation.UpdateAmazonListing(listing_id=amz_listing.id,
-                                                             priority=op.priority,
-                                                             params={'feesif': fee_params})
-                    self.dbsession.add(price_op)
+                # Test margins?
+                if 'testmargins' in params:
+                    if 'salesrank' not in params['testmargins'] \
+                        or (amz_listing.salesrank and amz_listing.salesrank <= params['testmargins']['salesrank']):
 
-                # Add to list
-                if 'addtolist' in params:
-                    add_list = self.dbsession.query(List).filter_by(name=params['addtolist']).first()
-                    if add_list is None:
-                        add_list = List(name=params['addtolist'], is_amazon=True)
-                        self.dbsession.add(add_list)
-                        self.dbsession.flush()
-
-                    self.dbsession.add(self.dbsession.merge(ListMembership(list_id=add_list.id,
-                                                                           listing_id=amz_listing.id)))
+                        update_op = Operation.UpdateAmazonListing(listing=amz_listing,
+                                                                  params={'testmargins': params['testmargins']},
+                                                                  priority=op.priority)
+                        self.dbsession.add(update_op)
 
         op.message = '%s links found.' % len(vnd_listing.amz_links)
         op.complete = True
@@ -429,7 +507,7 @@ class OperationsManager(QObject):
 
                         fees=   Set the fees to the given value. If not provided, request fees from Amazon.
         """
-        amz_listing = self.dbsession.query(AmazonListing).filter_by(id=op.listing_id).first()
+        amz_listing = op.listing
         params = op.params
 
         if 'price' in params:
@@ -452,7 +530,7 @@ class OperationsManager(QObject):
             if self.is_error_response(r, op):
                 return
 
-            parser = GetMyFeesEstimateParser(r.content.decode())
+            parser = GetMyFeesEstimateParser(r.readAll().data().decode())
             fees = next(parser.get_fees())
             if fees is None or fees['status'] != 'Success':
                 op.error = True
@@ -474,16 +552,15 @@ class OperationsManager(QObject):
     def UpdateAmazonListing(self, op):
         """Update pricing, salesrank, offers, and merchant info for listing, then add to product history.
 
-        Parameters:         log=        Add the new product data to the log
-                            repeat=     Repeat this operation after the given number of minutes.
-                            feesif:     Schedule an FBA fees request for this listing if the pricing meets the
-                                        criteria.
-                                priceratio=     The ratio of the listing's price to that of any vendor is at least
-                                                'priceratio'.
-
+        Parameters:         log=            Add the new product data to the log
+                            repeat=         Repeat this operation after the given number of minutes.
+                            testmargins:    Create a TestMargins operation if the criteria are met.
+                                salesrank=  Sales Rank must be below the given value.
+                                threshold=  The minimum require profit margin to add to the list.
+                                list=       The name of the list to add matches to.
         """
 
-        amz_listing = self.dbsession.query(AmazonListing).filter_by(id=op.listing_id).one()
+        amz_listing = op.listing
         params = op.params
 
         r = self.paapi.ItemLookup(priority=op.priority,
@@ -493,7 +570,7 @@ class OperationsManager(QObject):
         if self.is_error_response(r, op):
             return
 
-        parser = ItemLookupParser(r.content.decode())
+        parser = ItemLookupParser(r.readAll().data().decode())
         info = parser.get_info()
 
         amz_listing.url = info['url']
@@ -525,7 +602,7 @@ class OperationsManager(QObject):
             if self.is_error_response(r, op):
                 return
 
-            parser = GetLowestOfferListingsForASINParser(r.content.decode())
+            parser = GetLowestOfferListingsForASINParser(r.readAll().data().decode())
             result = next(parser.get_product_info())
 
             if result['error']:
@@ -536,21 +613,15 @@ class OperationsManager(QObject):
                 amz_listing.price = result['price']
                 amz_listing.hasprime = result['prime']
 
-        # Maybe create a fees request
-        if 'feesif' in params \
-                and 'priceratio' in params['feesif'] \
-                and amz_listing.price is not None:
+        # Test margins?
+        if 'testmargins' in params:
+            if 'salesrank' not in params['testmargins'] \
+                or (amz_listing.salesrank and amz_listing.salesrank <= params['testmargins']['salesrank']):
 
-            maxratio = 0
-            for link in self.dbsession.query(LinkedProducts).filter_by(amz_listing_id=amz_listing.id):
-                maxratio = max(amz_listing.unit_price / link.vnd_listing.unit_price, maxratio)
-
-            if maxratio >= float(params['feesif']['priceratio']):
-                op.message = 'Getting FBA fees...'
-                fees_op = Operation.GetMyFeesEstimate(listing_id=amz_listing.id,
-                                                      priority=op.priority,
-                                                      params={'price': amz_listing.price})
-                self.dbsession.add(fees_op)
+                test_op = Operation.TestMargins(listing=amz_listing,
+                                                params=params['testmargins'],
+                                                priority=op.priority)
+                self.dbsession.add(test_op)
 
         if 'log' in params and params['log'] == True:
             self.dbsession.add(AmzProductHistory(amz_listing_id=amz_listing.id,
