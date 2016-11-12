@@ -45,7 +45,7 @@
   <action name="actionOpen_Amazon_view">
    <property name="icon">
     <iconset>
-     <normalon>icons/Amazon-icon.png</normalon>
+     <normalon>icons/amazon.png</normalon>
     </iconset>
    </property>
    <property name="text">
@@ -72,7 +72,7 @@
    <property name="icon">
     <iconset>
      <normaloff>icons/settings-2.png</normaloff>
-     <normalon>icons/settings-2.png</normalon>icons/settings-2.png</iconset>
+     <normalon>icons/ops_view.png</normalon>icons/settings-2.png</iconset>
    </property>
    <property name="text">
     <string>Open Operations view...</string>

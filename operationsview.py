@@ -1,20 +1,21 @@
 from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtWidgets import QMessageBox, QWidget
 
 from database import *
 from operations import OperationsManager, Operation
 
-from abstractview import AbstractView
+from baseview import BaseView
 from operationsview_ui import Ui_operationsView
 from dialogs import OperationDialog
 
 
-class OperationsView(AbstractView, Ui_operationsView):
+class OperationsView(BaseView, Ui_operationsView):
 
     def __init__(self, parent=None):
         super(OperationsView, self).__init__(parent=parent)
         self.setupUi(self)
-        self.tool_buttons = [self.actionStart, self.actionPause, self.actionNew_batch]
+
+        self.add_toolbar_actions([self.actionStart, self.actionPause, self.actionNew_batch])
 
         # Connect to the operations manager
         self.opsman = OperationsManager.get_instance()
@@ -44,7 +45,7 @@ class OperationsView(AbstractView, Ui_operationsView):
                                  filter(Operation.operation == op_name).\
                                  count()
 
-            # est_time += num * self.opsman.mwsapi.throttle_limits(op_name).restore_rate
+            est_time += num * self.opsman.get_wait(op_name, 0)
 
         self.pendingBox.setValue(pending)
         self.completedBox.setValue(completed)
@@ -64,9 +65,7 @@ class OperationsView(AbstractView, Ui_operationsView):
         source = dialog.source
 
         # Determine the correct source
-        if source == 'All Amazon products':
-            query = self.dbsession.query(Listing).filter_by(vendor_id=0)
-        elif source == 'All Vendor products':
+        if source == 'All Vendor products':
             query = self.dbsession.query(Listing).filter(Listing.vendor_id != 0)
         else:
             vendor_id = self.dbsession.query(Vendor.id).filter_by(name=source).scalar()

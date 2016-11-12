@@ -173,7 +173,7 @@
   <action name="actionStart">
    <property name="icon">
     <iconset>
-     <normalon>icons/play-button.png</normalon>
+     <normalon>icons/start.png</normalon>
     </iconset>
    </property>
    <property name="text">
@@ -199,7 +199,7 @@
   <action name="actionNew_batch">
    <property name="icon">
     <iconset>
-     <normalon>icons/settings.png</normalon>
+     <normalon>icons/operations.png</normalon>
     </iconset>
    </property>
    <property name="text">

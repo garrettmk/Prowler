@@ -81,11 +81,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def tab_changed(self, index):
         if self.current_tab:
-            for action in self.current_tab.tool_buttons:
+            for action in self.current_tab.toolbar_actions:
                 self.toolBar.removeAction(action)
 
         self.current_tab = self.tabs.currentWidget()
 
         if self.current_tab:
-            for action in self.current_tab.tool_buttons:
+            for action in self.current_tab.toolbar_actions:
                 self.toolBar.addAction(action)

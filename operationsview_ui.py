@@ -99,7 +99,7 @@ class Ui_operationsView(object):
         self.verticalLayout.addLayout(self.horizontalLayout)
         self.actionStart = QtWidgets.QAction(operationsView)
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap("icons/play-button.png"), QtGui.QIcon.Normal, QtGui.QIcon.On)
+        icon.addPixmap(QtGui.QPixmap("icons/start.png"), QtGui.QIcon.Normal, QtGui.QIcon.On)
         self.actionStart.setIcon(icon)
         self.actionStart.setObjectName("actionStart")
         self.actionPause = QtWidgets.QAction(operationsView)
@@ -109,7 +109,7 @@ class Ui_operationsView(object):
         self.actionPause.setObjectName("actionPause")
         self.actionNew_batch = QtWidgets.QAction(operationsView)
         icon2 = QtGui.QIcon()
-        icon2.addPixmap(QtGui.QPixmap("icons/settings.png"), QtGui.QIcon.Normal, QtGui.QIcon.On)
+        icon2.addPixmap(QtGui.QPixmap("icons/operations.png"), QtGui.QIcon.Normal, QtGui.QIcon.On)
         self.actionNew_batch.setIcon(icon2)
         self.actionNew_batch.setObjectName("actionNew_batch")
 

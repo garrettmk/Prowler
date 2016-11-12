@@ -73,6 +73,7 @@ class ListMatchingProductsParser(MWSResponseParser):
 
             # TODO: Implement a more robust/accurate way to get category and sales rank
             product['productcategoryid'] = self.xpath_get('.//ProductCategoryId', tag)
+            product['productgroup'] = self.xpath_get('.//ProductGroup', tag)
             product['salesrank'] = self.xpath_get('.//SalesRank/Rank', tag, int)
 
             product['quantity'] = max(self.xpath_get('.//NumberOfItems', tag, int, default=0),

@@ -24,37 +24,48 @@ from search_listings_dialog_ui import Ui_searchListingsDialog
 
 class ImportCSVDialog(QDialog, Ui_ImportCSV):
 
-    def __init__(self, parent=None, vendors=[]):
+    def __init__(self, parent=None):
         super(ImportCSVDialog, self).__init__(parent=parent)
         self.setupUi(self)
 
-        self.vendorBox.addItems(vendors)
+        session = Session()
+
+        # Populate vendor names
+        vendor_names = [result.name for result in session.query(Vendor.name).filter(Vendor.name != 'Amazon')]
+        self.vendorBox.addItems(vendor_names)
+
+        # Shortcut to the OK button
         self.okbutton = self.buttonBox.button(QDialogButtonBox.Ok)
 
+        # Connections
         self.fileButton.clicked.connect(self.open_file)
         self.vendorBox.currentTextChanged.connect(self.maybe_enable_ok)
 
+        # Set the initial state
         self.okbutton.setEnabled(False)
         self.file_is_ok = False
 
     def maybe_enable_ok(self):
+        """Enable or disable the OK button based on the current state of the form."""
         if self.file_is_ok and self.vendorBox.currentText():
             self.okbutton.setEnabled(True)
         else:
             self.okbutton.setEnabled(False)
 
     def open_file(self):
+        """Respond to the 'Open File' action. """
         filename, ftype = QFileDialog.getOpenFileName(self, caption='Open CSV', filter='CSV Files (*.csv)')
         if not filename:
             return
 
         self.fileLine.setText(filename)
 
-        req_fields = ['brand', 'model', 'quantity', 'price']
+        req_fields = ['brand', 'model', 'quantity', 'price', 'sku']
 
         with open(filename) as file:
             reader = csv.DictReader(file)
 
+            # Make sure the file contains the required fields
             for field in req_fields:
                 if field not in reader.fieldnames:
                     self.statusLabel.setText('File does not contain all required fields: ' + ', '.join(req_fields))
@@ -189,8 +200,8 @@ class OperationDialog(QDialog, Ui_opsDialog):
             self.paramsStack.addWidget(widget)
 
         # Populate the source combo box
-        self.amz_srcs = []
-        self.vnd_srcs = []
+        self.amz_srcs = ['Amazon']
+        self.vnd_srcs = ['All vendor products']
 
         for result in self.dbsession.query(List).all():
             if result.is_amazon:
@@ -199,13 +210,12 @@ class OperationDialog(QDialog, Ui_opsDialog):
                 self.vnd_srcs.append(result.name)
 
         self.vnd_srcs.extend([result.name for result in self.dbsession.query(Vendor.name).\
-                                                                       filter(Vendor.id != 0).\
+                                                                       filter(Vendor.name != 'Amazon').\
                                                                        all()])
-        self.amz_srcs.insert(0, 'All Amazon products')
-        self.vnd_srcs.insert(0, 'All Vendor products')
 
         # Populate the combo boxes
         self.sourceBox.addItems(self.amz_srcs)
+        self.sourceBox.insertSeparator(len(self.amz_srcs))
         self.sourceBox.addItems(self.vnd_srcs)
 
         # UI connections
@@ -283,12 +293,14 @@ class OperationDialog(QDialog, Ui_opsDialog):
 
 class SelectListDialog(QDialog, Ui_selectListDialog):
 
-    def __init__(self, list_names=None, readonly=False, parent=None):
+    def __init__(self, show_amazon=False, readonly=False, parent=None):
         super(SelectListDialog, self).__init__(parent=parent)
         self.setupUi(self)
 
-        if list_names:
-            self.listNameBox.addItems(list_names)
+        session = Session()
+
+        list_names = [result.name for result in session.query(List.name).filter_by(is_amazon=show_amazon)]
+        self.listNameBox.addItems(list_names)
 
         self.listNameBox.setEditable(not readonly)
 
@@ -425,20 +437,20 @@ class SearchAmazonDialog(QDialog, Ui_searchAmazonDialog):
 
 class SearchListingsDialog(QDialog, Ui_searchListingsDialog):
 
-    def __init__(self, amazon=False, parent=None):
+    def __init__(self, show_amazon=False, parent=None):
         super(SearchListingsDialog, self).__init__(parent=parent)
         self.setupUi(self)
 
-        self.amazon = amazon
+        self.amazon = show_amazon
         self.dbsession = Session()
 
         # Populate the sources combo box
-        condition = Vendor.name == 'Amazon' if amazon else Vendor.name != 'Amazon'
+        condition = Vendor.name == 'Amazon' if show_amazon else Vendor.name != 'Amazon'
 
         vendor_names = [result.name for result in self.dbsession.query(Vendor.name).filter(condition)]
-        list_names = [result.name for result in self.dbsession.query(List.name).filter(List.is_amazon == amazon)]
+        list_names = [result.name for result in self.dbsession.query(List.name).filter(List.is_amazon == show_amazon)]
 
-        if not amazon:
+        if not show_amazon:
             vendor_names.insert(0, 'All Vendor products')
 
         self.sourceBox.addItems(vendor_names)
