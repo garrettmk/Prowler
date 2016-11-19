@@ -17,6 +17,11 @@ class OperationsView(BaseView, Ui_operationsView):
 
         self.add_toolbar_actions([self.actionStart, self.actionPause, self.actionNew_batch])
 
+        # Connections
+        self.clearPendingBtn.clicked.connect(self.on_clear_pending)
+        self.clearCompletedBtn.clicked.connect(self.on_clear_completed)
+        self.clearErrorsBtn.clicked.connect(self.on_clear_errors)
+
         # Connect to the operations manager
         self.opsman = OperationsManager.get_instance()
         self.opsman.status_message.connect(self.messageList.addItem)
@@ -37,7 +42,6 @@ class OperationsView(BaseView, Ui_operationsView):
         completed = self.dbsession.query(Operation).filter(Operation.complete == True).count()
         errors = self.dbsession.query(Operation).filter(Operation.error == True).count()
 
-        # TODO: use api calls to calculate remaining time, not operation names
         est_time = 0
         for op_name in self.opsman.supported_ops:
             num = self.dbsession.query(Operation).\
@@ -45,7 +49,7 @@ class OperationsView(BaseView, Ui_operationsView):
                                  filter(Operation.operation == op_name).\
                                  count()
 
-            est_time += num * self.opsman.get_wait(op_name, 0)
+            est_time += num * self.opsman.get_wait(op_name, -1)
 
         self.pendingBox.setValue(pending)
         self.completedBox.setValue(completed)
@@ -93,3 +97,21 @@ class OperationsView(BaseView, Ui_operationsView):
 
         self.dbsession.commit()
         self.update_counts()
+
+    def on_clear_pending(self):
+        if QMessageBox.question(self, 'Confirm', 'Delete all pending operations?') == QMessageBox.Yes:
+            self.dbsession.query(Operation).filter_by(complete=False, error=False).delete()
+            self.dbsession.commit()
+            self.update_counts()
+
+    def on_clear_completed(self):
+        if QMessageBox.question(self, 'Confirm', 'Delete all completed operations?') == QMessageBox.Yes:
+            self.dbsession.query(Operation).filter_by(complete=True, error=False).delete()
+            self.dbsession.commit()
+            self.update_counts()
+
+    def on_clear_errors(self):
+        if QMessageBox.question(self, 'Confirm', 'Delete all failed operations?') == QMessageBox.Yes:
+            self.dbsession.query(Operation).filter_by(error=True).delete()
+            self.dbsession.commit()
+            self.update_counts()

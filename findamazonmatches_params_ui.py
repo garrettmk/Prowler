@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Form implementation generated from reading ui file 'listmatchingproducts_params.ui'
+# Form implementation generated from reading ui file 'finamazonmatches_params.ui'
 #
 # Created by: PyQt5 UI code generator 5.7
 #

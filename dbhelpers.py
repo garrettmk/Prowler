@@ -14,7 +14,6 @@ def get_or_create(session, dtype, **kwargs):
 def add_ids_to_list(session, listing_ids, list_name):
     """Add all listings specified in ids to list named list_name. Will create a new list if necessary. """
     add_list = get_or_create(session, List, name=list_name)
-    session.add(add_list)
 
     for listing_id in listing_ids:
         get_or_create(session, ListMembership, list=add_list, listing_id=listing_id)
@@ -35,9 +34,24 @@ def remove_ids_from_list(session, listing_ids, list_name):
             session.delete(membership)
 
 
-def link_products(session, amz_listing_id, vnd_listing_id):
-    """Create a link between two products, unless one already exists."""
+def link_products_ids(session, amz_listing_id, vnd_listing_id):
+    """Retrieve or create a link between two products, based on their IDs."""
     link = get_or_create(session, LinkedProducts, amz_listing_id=amz_listing_id, vnd_listing_id=vnd_listing_id)
+    if link.confidence is None:
+        session.flush()
+        link.build_confidence()
+
+    return link
+
+
+def link_products(session, amz, vnd):
+    """Retrieve or create a link between two products."""
+    link = get_or_create(session, LinkedProducts, amz_listing_id=amz.id, vnd_listing_id=vnd.id)
+    if link.confidence is None:
+        link.amz_listing = amz
+        link.vnd_listing = vnd
+        link.build_confidence()
+
     return link
 
 
@@ -67,4 +81,20 @@ def set_watch(session, listing_id, time):
     else:
         watch = watch or Operation.UpdateAmazonListing(listing_id=listing_id, priority=5)
         watch.params = {'log': True, 'repeat': time}
+        watch.scheduled = func.now()
         session.add(watch)
+
+
+def get_or_create_category(session, productcategory_id, product_group):
+    """Get or create an Amazon product category, given a ProductCategoryId or ProductGroup value. If both values are
+    None, returns the 'Unknown' category.
+    """
+    category = None
+
+    if productcategory_id:
+        category = get_or_create(session, AmazonCategory, product_category_id=productcategory_id)
+        category.name = category.name or productcategory_id
+    elif product_group:
+        category = session.query(AmazonCategory).filter(AmazonCategory.product_groups.contains(product_group)).first()
+
+    return category or get_or_create(session, AmazonCategory, name='Unknown')

@@ -1,13 +1,204 @@
 import re
 from lxml import etree
 
+from database import *
+import dbhelpers
+
 
 class ParseError(Exception):
     pass
 
 
-class MWSResponseParser:
+class XmlResponseElement:
+    """Base class for an XML response element."""
 
+    def __init__(self, tag=None):
+        self._tag = tag
+
+    @property
+    def tag(self):
+        return self._tag
+
+    @tag.setter
+    def tag(self, value):
+        self._tag = value
+
+    def xpath_get(self, path, dtype=str, default=None):
+        """Use XPath to get values under the current tag. Return a value of type dtype, or the default value."""
+        items = self._tag.xpath(path)
+        try:
+            return dtype(items[0].text)
+        except (TypeError, IndexError):
+            return default
+
+    def xpath_get_all(self, path, dtype=str, default=None):
+        """Return a list of all values with the given path."""
+        items = self._tag.xpath(path)
+        response = []
+        for item in items:
+            try:
+                response.append(dtype(item.text))
+            except TypeError:
+                response.append(default)
+
+        return response
+
+
+class AmzResponseParser:
+    """Base class for parsing XML responses from the Amazon MWS or Product Advertising APIs."""
+
+    # Regexes for removing namespaces from the XML - makes it easier to parse
+    re_ns_decl = re.compile(r' xmlns(:\w*)?="[^"]*"', re.IGNORECASE)
+    re_ns_open = re.compile(r'<\w+:')
+    re_ns_close = re.compile(r'/\w+:')
+
+    def __init__(self, xml):
+        try:
+            tree = etree.fromstring(self._remove_namespace(xml))
+        except Exception as e:
+            raise ParseError(repr(e))
+
+        self._tag = tree
+
+    def _remove_namespace(self, xml):
+        """Remove all traces of namespaces from an XML string."""
+        response = self.re_ns_decl.sub('', xml)          # Remove namespace declarations
+        response = self.re_ns_open.sub('<', response)    # Remove namespaces in opening tags
+        response = self.re_ns_close.sub('/', response)   # Remove namespaces in closing tags
+        return response
+
+
+class ProductParser(XmlResponseElement):
+    """Provides a normalized way to access information in a 'Product' or 'Item' tag."""
+
+    def update(self, amz_listing):
+        """Update the given Amazon listing with the information in this parser."""
+        amz_listing.sku = self.asin
+        amz_listing.title = self.title
+        amz_listing.brand = self.brand
+        amz_listing.model = self.model
+        amz_listing.upc = self.upc
+        amz_listing.quantity = self.quantity
+        amz_listing.url = self.url
+        amz_listing.salesrank = self.salesrank
+        amz_listing.offers = self.offers
+        amz_listing.hasprime = self.prime
+
+        # Only update price if price information is provided
+        if self._tag.xpath('.//Offers'):
+            amz_listing.price = self.price
+
+    @property
+    def asin(self):
+        return self.xpath_get('.//ASIN')
+
+    @property
+    def brand(self):
+        return self.xpath_get('.//Brand') \
+            or self.xpath_get('.//Manufacturer') \
+            or self.xpath_get('.//Label') \
+            or self.xpath_get('.//Publisher') \
+            or self.xpath_get('.//Studio')
+
+    @property
+    def model(self):
+        return self.xpath_get('.//Model') \
+            or self.xpath_get('.//PartNumber') \
+            or self.xpath_get('.//MPN')
+
+    @property
+    def title(self):
+        return self.xpath_get('.//Title')
+
+    @property
+    def salesrank(self):
+        return self.xpath_get('.//SalesRank/Rank', dtype=int) \
+            or self.xpath_get('.//SalesRank', dtype=int)
+
+    @property
+    def price(self):
+        price = self.xpath_get('.//OfferListing/Price/Amount', dtype=int)
+        if price:
+            price /= 100
+
+        return price
+
+    @property
+    def upc(self):
+        return self.xpath_get('.//UPC')
+
+    @property
+    def quantity(self):
+        quantities = []
+
+        # Check it quantity is specified in the product data
+        quantities.append(max(self.xpath_get('.//NumberOfItems', dtype=int, default=1),
+                              self.xpath_get('.//PackageQuantity', dtype=int, default=1)))
+
+
+        # Match "pack of" "case of" "box of" etc.
+        r1 = re.compile(r'(?:pack|pk|case|cs|set|box|bx|count|ct) of (\d+[\d,]*)', re.IGNORECASE)
+        # Match "per box" "x dozen" "x units per case" "10-pack" "50/ct" etc
+        r2 = re.compile(r'(\d+[\d,]*)\s*\w*(?:[/\- ]*|\s*per\s*)(piece|pc|pack|pk|case|cs|set|box|bx|dozen|dz|count|ct)', re.IGNORECASE)
+
+        features = [tag.text for tag in self._tag.iterdescendants('Feature')]
+        features.append(self.title)
+
+        for feature in features:
+
+            match = r1.search(feature)
+            if match:
+                quantities.append(int(match.group(1).replace(',', '')))
+
+            match = r2.search(feature)
+            if match:
+                dz = match.group(2).lower()
+                mult = 12 if dz == 'dozen' or dz == 'dz' else 1
+                quantities.append(int(match.group(1).replace(',', '')) * mult)
+
+        return max(quantities)
+
+    @property
+    def offers(self):
+        return self.xpath_get('.//OfferSummary/TotalNew', dtype=int)
+
+    @property
+    def merchant(self):
+        return self.xpath_get('.//Offer/Merchant/Name')
+
+    @property
+    def prime(self):
+        return bool(self.xpath_get('.//IsEligibleForPrime', dtype=int, default=0))
+
+    @property
+    def url(self):
+        return "http://www.amazon.com/dp/%s" % self.asin
+
+    @property
+    def product_category_id(self):
+        return self.xpath_get('.//ProductCategoryId')
+
+    @property
+    def product_group(self):
+        return self.xpath_get('.//ProductGroup')
+
+
+class ListMatchingProductsParser(AmzResponseParser):
+    """Parses the response from ListMatchingProducts."""
+
+    @property
+    def products(self):
+        """Iterate through the 'Product' response tags."""
+        for tag in self._tag.iterdescendants('Product'):
+            yield ProductParser(tag)
+
+
+
+
+class MWSResponseParser:
+    """Base class for the response parsers. Provides methods for parsing XML."""
+
+    # Regexes for removing namespaces from the XML - makes it easier to parse
     re_ns_decl = re.compile(r' xmlns(:\w*)?="[^"]*"', re.IGNORECASE)
     re_ns_open = re.compile(r'<\w+:')
     re_ns_close = re.compile(r'/\w+:')
@@ -35,7 +226,8 @@ class MWSResponseParser:
             return default
 
 
-class ErrorResponseParser(MWSResponseParser):
+class ErrorResponseParser(AmzResponseParser, XmlResponseElement):
+    """Provides information from an error response."""
 
     @property
     def type(self):
@@ -50,42 +242,40 @@ class ErrorResponseParser(MWSResponseParser):
         return self.xpath_get('.//Error/Message')
 
 
-class ListMatchingProductsParser(MWSResponseParser):
+# class ListMatchingProductsParser(MWSResponseParser):
+#     """Parses a response from ListMatchingProducts."""
+#
+#     def products(self):
+#
+#         session = Session()
+#
+#         for tag in self.tree.iterdescendants('Product'):
+#             asin = self.xpath_get('.//MarketplaceASIN/ASIN', tag)
+#             product = dbhelpers.get_or_create(session, AmazonListing, sku=asin)
+#
+#             product.brand = self.xpath_get('.//Brand', tag) \
+#                             or self.xpath_get('.//Manufacturer', tag) \
+#                             or self.xpath_get('.//Label')
+#
+#             product.model = self.xpath_get('.//Model', tag) \
+#                             or self.xpath_get('.//PartNumber', tag)
+#
+#             product.title = self.xpath_get('.//Title', tag)
+#
+#             product.salesrank = self.xpath_get('.//SalesRank/Rank', tag, int)
+#
+#             # Try to determine product category
+#             category_id = self.xpath_get('.//ProductCategoryId', tag)
+#             product_group = self.xpath_get('.//ProductGroup', tag)
+#
+#             product.category = dbhelpers.get_or_create_category(session, category_id, product_group)
+#
+#             # Try to determine listing quantity
+#             product.quantity = max(self.xpath_get('.//NumberOfItems', tag, int, default=1),
+#                                    self.xpath_get('.//PackageQuantity', tag, int, default=1))
+#
+#             yield product
 
-    def get_products(self):
-
-        for tag in self.tree.iterdescendants('Product'):
-            product = {}
-
-            product['asin'] = self.xpath_get('.//MarketplaceASIN/ASIN', tag)
-
-            product['brand'] = self.xpath_get('.//Brand', tag) \
-                               or self.xpath_get('.//Manufacturer', tag) \
-                               or self.xpath_get('.//Label', tag)
-
-            product['model'] = self.xpath_get('.//Model', tag) \
-                               or self.xpath_get('.//PartNumber', tag)
-
-            # I don't know if UPC is provided by ListMatchingProducts...
-            product['upc'] = self.xpath_get('.//UPC', tag)
-
-            product['title'] = self.xpath_get('.//Title', tag)
-
-            # TODO: Implement a more robust/accurate way to get category and sales rank
-            product['productcategoryid'] = self.xpath_get('.//ProductCategoryId', tag)
-            product['productgroup'] = self.xpath_get('.//ProductGroup', tag)
-            product['salesrank'] = self.xpath_get('.//SalesRank/Rank', tag, int)
-
-            product['quantity'] = max(self.xpath_get('.//NumberOfItems', tag, int, default=0),
-                                      self.xpath_get('.//PackageQuantity', tag, int, default=0),
-                                      1)
-
-            features = []
-            for feature in tag.iterdescendants('Feature'):
-                features.append(feature.text)
-            product['features'] = '\n'.join(features)
-
-            yield product
 
 
 class GetCompetitivePricingForASINParser(MWSResponseParser):
@@ -161,26 +351,37 @@ class GetMyFeesEstimateParser(MWSResponseParser):
             yield result
 
 
-class ItemLookupParser(MWSResponseParser):
+class ItemLookupParser(AmzResponseParser):
 
-    def get_info(self):
-        info = {}
+    @property
+    def product(self):
+        items = self._tag.xpath('//Item')
+        if items:
+            return ProductParser(items[0])
+        else:
+            return None
 
-        info['asin'] = self.xpath_get('.//ASIN')
-        info['url'] = self.xpath_get('.//DetailPageURL')
-        info['salesrank'] = self.xpath_get('.//SalesRank', dtype=int)
-        info['upc'] = self.xpath_get('.//UPC')
 
-        info['offers'] = self.xpath_get('.//OfferSummary/TotalNew', dtype=int)
-        info['merchant'] = self.xpath_get('.//Merchant/Name')
-        info['price'] = self.xpath_get('.//Price/Amount', dtype=int)
-
-        if info['price']:
-            info['price'] /= 100
-
-        info['prime'] = bool(self.xpath_get('.//IsEligibleForPrime', dtype=int, default=0))
-
-        return info
+# class ItemLookupParser(MWSResponseParser):
+#
+#     def get_info(self):
+#         info = {}
+#
+#         info['asin'] = self.xpath_get('.//ASIN')
+#         info['url'] = self.xpath_get('.//DetailPageURL')
+#         info['salesrank'] = self.xpath_get('.//SalesRank', dtype=int)
+#         info['upc'] = self.xpath_get('.//UPC')
+#
+#         info['offers'] = self.xpath_get('.//OfferSummary/TotalNew', dtype=int)
+#         info['merchant'] = self.xpath_get('.//Merchant/Name')
+#         info['price'] = self.xpath_get('.//Price/Amount', dtype=int)
+#
+#         if info['price']:
+#             info['price'] /= 100
+#
+#         info['prime'] = bool(self.xpath_get('.//IsEligibleForPrime', dtype=int, default=0))
+#
+#         return info
 
 
 
@@ -558,3 +759,173 @@ xml4 = """<?xml version="1.0"?>
   <RequestId>1e37d1fe-9479-4501-adff-a88948ee0248</RequestId>
 </ResponseMetadata>
 </GetCompetitivePricingForASINResponse>"""
+
+listmatchesxml = """<?xml version="1.0"?>
+<ItemLookupResponse xmlns="http://webservices.amazon.com/AWSECommerceService/2011-08-01">
+<OperationRequest>
+    <HTTPHeaders>
+        <Header Name="UserAgent" Value="amazonmws/0.0.1 (Language=Python)"/>
+    </HTTPHeaders>
+    <RequestId>a52c73b5-2bff-447d-bed9-aad53f101215</RequestId>
+    <Arguments>
+        <Argument Name="AWSAccessKeyId" Value="AKIAJ5DMMGOMROO42YTQ"/>
+        <Argument Name="AssociateTag" Value="gmksourcing-20"/>
+        <Argument Name="ItemId" Value="B0000VLZK8"/>
+        <Argument Name="Operation" Value="ItemLookup"/>
+        <Argument Name="ResponseGroup" Value="OfferFull, SalesRank, ItemAttributes"/>
+        <Argument Name="Service" Value="AWSECommerceService"/>
+        <Argument Name="SignatureMethod" Value="HmacSHA256"/>
+        <Argument Name="SignatureVersion" Value="2"/>
+        <Argument Name="Timestamp" Value="2016-11-13T23:50:02Z"/>
+        <Argument Name="Version"/>
+        <Argument Name="Signature" Value="sG7nAA29rHgm+HcHPQoz+wksoh15fLT3ZuT9sYybYdo="/>
+    </Arguments>
+    <RequestProcessingTime>0.0452704550000000</RequestProcessingTime>
+</OperationRequest>
+<Items>
+    <Request>
+        <IsValid>True</IsValid>
+        <ItemLookupRequest>
+            <IdType>ASIN</IdType>
+            <ItemId>B0000VLZK8</ItemId>
+            <ResponseGroup>OfferFull</ResponseGroup>
+            <ResponseGroup>SalesRank</ResponseGroup>
+            <ResponseGroup>ItemAttributes</ResponseGroup>
+            <VariationPage>All</VariationPage>
+        </ItemLookupRequest>
+    </Request>
+    <Item>
+        <ASIN>B0000VLZK8</ASIN>
+        <ParentASIN>B004P1HTOU</ParentASIN>
+        <DetailPageURL>https://www.amazon.com/Rubbermaid-FG193300WHT-2-Inch-Spoon-Shaped-Spatula/dp/B0000VLZK8%3Fpsc%3D1%26SubscriptionId%3DAKIAJ5DMMGOMROO42YTQ%26tag%3Dgmksourcing-20%26linkCode%3Dxm2%26camp%3D2025%26creative%3D165953%26creativeASIN%3DB0000VLZK8</DetailPageURL>
+        <ItemLinks>
+            <ItemLink>
+                <Description>Technical Details</Description>
+                <URL>https://www.amazon.com/Rubbermaid-FG193300WHT-2-Inch-Spoon-Shaped-Spatula/dp/tech-data/B0000VLZK8%3FSubscriptionId%3DAKIAJ5DMMGOMROO42YTQ%26tag%3Dgmksourcing-20%26linkCode%3Dxm2%26camp%3D2025%26creative%3D386001%26creativeASIN%3DB0000VLZK8</URL>
+            </ItemLink>
+            <ItemLink>
+                <Description>Add To Baby Registry</Description>
+                <URL>https://www.amazon.com/gp/registry/baby/add-item.html%3Fasin.0%3DB0000VLZK8%26SubscriptionId%3DAKIAJ5DMMGOMROO42YTQ%26tag%3Dgmksourcing-20%26linkCode%3Dxm2%26camp%3D2025%26creative%3D386001%26creativeASIN%3DB0000VLZK8</URL>
+            </ItemLink>
+            <ItemLink>
+                <Description>Add To Wedding Registry</Description>
+                <URL>https://www.amazon.com/gp/registry/wedding/add-item.html%3Fasin.0%3DB0000VLZK8%26SubscriptionId%3DAKIAJ5DMMGOMROO42YTQ%26tag%3Dgmksourcing-20%26linkCode%3Dxm2%26camp%3D2025%26creative%3D386001%26creativeASIN%3DB0000VLZK8</URL>
+            </ItemLink>
+            <ItemLink>
+                <Description>Add To Wishlist</Description>
+                <URL>https://www.amazon.com/gp/registry/wishlist/add-item.html%3Fasin.0%3DB0000VLZK8%26SubscriptionId%3DAKIAJ5DMMGOMROO42YTQ%26tag%3Dgmksourcing-20%26linkCode%3Dxm2%26camp%3D2025%26creative%3D386001%26creativeASIN%3DB0000VLZK8</URL>
+            </ItemLink>
+            <ItemLink>
+                <Description>Tell A Friend</Description>
+                <URL>https://www.amazon.com/gp/pdp/taf/B0000VLZK8%3FSubscriptionId%3DAKIAJ5DMMGOMROO42YTQ%26tag%3Dgmksourcing-20%26linkCode%3Dxm2%26camp%3D2025%26creative%3D386001%26creativeASIN%3DB0000VLZK8</URL>
+            </ItemLink>
+            <ItemLink>
+                <Description>All Customer Reviews</Description>
+                <URL>https://www.amazon.com/review/product/B0000VLZK8%3FSubscriptionId%3DAKIAJ5DMMGOMROO42YTQ%26tag%3Dgmksourcing-20%26linkCode%3Dxm2%26camp%3D2025%26creative%3D386001%26creativeASIN%3DB0000VLZK8</URL>
+            </ItemLink>
+            <ItemLink>
+                <Description>All Offers</Description>
+                <URL>https://www.amazon.com/gp/offer-listing/B0000VLZK8%3FSubscriptionId%3DAKIAJ5DMMGOMROO42YTQ%26tag%3Dgmksourcing-20%26linkCode%3Dxm2%26camp%3D2025%26creative%3D386001%26creativeASIN%3DB0000VLZK8</URL>
+            </ItemLink>
+        </ItemLinks>
+        <SalesRank>47598</SalesRank>
+        <ItemAttributes>
+            <Binding>Misc.</Binding>
+            <Brand>Rubbermaid Commercial</Brand>
+            <CatalogNumberList>
+                <CatalogNumberListElement>FG193300WHT</CatalogNumberListElement>
+                <CatalogNumberListElement>RCP1933WHI</CatalogNumberListElement>
+            </CatalogNumberList>
+            <Color>white</Color>
+            <EAN>0086876162226</EAN>
+            <EANList>
+                <EANListElement>0086876162226</EANListElement>
+            </EANList>
+            <Feature>Spoon, scrape and spread with one easy tool. Clean-Rest reduces risk of cross-contamination.</Feature>
+            <Feature>Blades are molded into handles for seamless construction that reduces build-up of dirt and bacteria</Feature>
+            <Feature>Clean-Rest feature keeps blade off countertops, reducing cross-contamination</Feature>
+            <Feature>NSF certified and commercial dishwasher safe</Feature>
+            <Feature>Blades molded onto handles for permanent bond</Feature>
+            <Feature>Seamless construction resists dirt or bacteria build up</Feature>
+            <Feature>All handles and blades are white</Feature>
+            <Feature>Commercial dishwasher safe</Feature>
+            <Feature>Certified to NSF Standard</Feature>
+            <ItemDimensions>
+                <Height Units="hundredths-inches">50</Height>
+                <Length Units="hundredths-inches">950</Length>
+                <Weight Units="hundredths-pounds">50</Weight>
+                <Width Units="hundredths-inches">347</Width>
+            </ItemDimensions>
+            <Label>Rubbermaid</Label>
+            <ListPrice>
+                <Amount>422</Amount>
+                <CurrencyCode>USD</CurrencyCode>
+                <FormattedPrice>$4.22</FormattedPrice>
+            </ListPrice>
+            <Manufacturer>Rubbermaid</Manufacturer>
+            <Model>FG193300WHT</Model>
+            <MPN>FG193300WHT</MPN>
+            <NumberOfItems>1</NumberOfItems>
+            <PackageDimensions>
+                <Height Units="hundredths-inches">40</Height>
+                <Length Units="hundredths-inches">950</Length>
+                <Weight Units="hundredths-pounds">22</Weight>
+                <Width Units="hundredths-inches">270</Width>
+            </PackageDimensions>
+            <PackageQuantity>1</PackageQuantity>
+            <PartNumber>FG193300WHT</PartNumber>
+            <ProductGroup>Kitchen</ProductGroup>
+            <ProductTypeName>HOME</ProductTypeName>
+            <Publisher>Rubbermaid</Publisher>
+            <Size>9-1/2"</Size>
+            <Studio>Rubbermaid</Studio>
+            <Title>Rubbermaid FG193300WHT 9-1/2-Inch Spoon-Shaped Spatula</Title>
+            <UPC>086876162226</UPC>
+            <UPCList>
+                <UPCListElement>086876162226</UPCListElement>
+            </UPCList>
+        </ItemAttributes>
+        <OfferSummary>
+            <LowestNewPrice>
+                <Amount>562</Amount>
+                <CurrencyCode>USD</CurrencyCode>
+                <FormattedPrice>$5.62</FormattedPrice>
+            </LowestNewPrice>
+            <TotalNew>11</TotalNew>
+            <TotalUsed>0</TotalUsed>
+            <TotalCollectible>0</TotalCollectible>
+            <TotalRefurbished>0</TotalRefurbished>
+        </OfferSummary>
+        <Offers>
+            <TotalOffers>1</TotalOffers>
+            <TotalOfferPages>1</TotalOfferPages>
+            <MoreOffersUrl>https://www.amazon.com/gp/offer-listing/B0000VLZK8%3FSubscriptionId%3DAKIAJ5DMMGOMROO42YTQ%26tag%3Dgmksourcing-20%26linkCode%3Dxm2%26camp%3D2025%26creative%3D386001%26creativeASIN%3DB0000VLZK8</MoreOffersUrl>
+            <Offer>
+                <Merchant>
+                    <Name>GMK Sourcing</Name>
+                </Merchant>
+                <OfferAttributes>
+                    <Condition>New</Condition>
+                </OfferAttributes>
+                <OfferListing>
+                    <OfferListingId>vs5OsPGRRvPFy2uxvdaaILVrTn6Y9hrTlOrF%2FsspuX8QmwM6gDn4goT9Psf5Uw%2F2JfMaoOaPXaX3Lb5IGaZF2yu1pNH06lB9FojHylWn7EG7MStbTr2N8Qa1rn%2Fuvs4ISho%2FvswbrKVESX1AX8ZJJuc62cSCcT0T</OfferListingId>
+                    <Price>
+                        <Amount>1099</Amount>
+                        <CurrencyCode>USD</CurrencyCode>
+                        <FormattedPrice>$10.99</FormattedPrice>
+                    </Price>
+                    <Availability>Usually ships in 24 hours</Availability>
+                    <AvailabilityAttributes>
+                        <AvailabilityType>now</AvailabilityType>
+                        <MinimumHours>24</MinimumHours>
+                        <MaximumHours>24</MaximumHours>
+                    </AvailabilityAttributes>
+                    <IsEligibleForSuperSaverShipping>0</IsEligibleForSuperSaverShipping>
+                    <IsEligibleForPrime>1</IsEligibleForPrime>
+                </OfferListing>
+            </Offer>
+        </Offers>
+    </Item>
+</Items>
+</ItemLookupResponse>
+"""

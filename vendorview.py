@@ -10,7 +10,7 @@ import dbhelpers
 
 from prowlerwidgets import ProwlerTableWidget, ProductDetailsWidget
 from baseview import BaseSourceView
-from dialogs import ImportCSVDialog, ProgressDialog
+from dialogs import ImportCSVDialog, ProgressDialog, EditVendorDialog
 
 from vnd_listing_details_ui import Ui_vendorListingDetails
 
@@ -28,6 +28,9 @@ class VndProductDetailsWidget(ProductDetailsWidget, Ui_vendorListingDetails):
         # Update other fields
         self.mapper.currentIndexChanged.connect(self.update_vendor)
 
+        # Edit vendor
+        self.openVendorBtn.clicked.connect(self.on_edit_vendor)
+
     def update_vendor(self):
         """Manually update the vendor name field. It isn't covered by the data mapper."""
         vnd_name = self.source.vendor.name if self.source else ''
@@ -37,6 +40,14 @@ class VndProductDetailsWidget(ProductDetailsWidget, Ui_vendorListingDetails):
         super(VndProductDetailsWidget, self).rewind_lines()
         self.updatedLine.home(False)
         self.urlLine.home(False)
+
+    def on_edit_vendor(self):
+        if self.source is None:
+            QMessageBox.information(self, 'Error', 'No product selected.')
+            return
+
+        dialog = EditVendorDialog(default=self.source.vendor.name, parent=self)
+        dialog.exec()
 
 
 class VndProductLinksWidget(ProwlerTableWidget):
@@ -189,6 +200,8 @@ class VendorView(BaseSourceView):
         vendor = dbhelpers.get_or_create(self.dbsession, Vendor, name=vendor_name)
         self.dbsession.flush()
 
+        add_list = dbhelpers.get_or_create(self.dbsession, List, name=dialog.list_name) if dialog.list_name else None
+
         with open(file_name) as file:
             dialog = ProgressDialog(minimum=start_row, maximum=end_row, parent=self)
             dialog.setModal(True)
@@ -223,6 +236,9 @@ class VendorView(BaseSourceView):
                 product.price = row.get('price')
                 product.url = row.get('url')
                 product.updated = func.now()
+
+                if add_list:
+                    dbhelpers.get_or_create(self.dbsession, ListMembership, list=add_list, listing=product)
 
         self.dbsession.commit()
 

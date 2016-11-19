@@ -138,9 +138,12 @@ class BaseSourceView(BaseView):
         """Respond to a change in the source selector combo box."""
         # Update the selected source
         sel_text = self.sourceBox.currentText()
+        self.load_source(sel_text)
 
-        source = self.dbsession.query(Vendor).filter_by(name=sel_text).first() \
-                 or self.dbsession.query(List).filter_by(name=sel_text).first()
+    def load_source(self, name):
+        """Load the source with the provided name."""
+        source = self.dbsession.query(Vendor).filter_by(name=name).first() \
+                 or self.dbsession.query(List).filter_by(name=name).first()
 
         self._selected_source = source
 
@@ -156,7 +159,7 @@ class BaseSourceView(BaseView):
 
     def reload(self):
         """Reloads the currently selected source."""
-        self.on_source_selection_changed()
+        self.load_source(self._selected_source.name if self._selected_source else None)
 
     def on_main_selection_changed(self):
         """Respond to a change of selection in the main table view."""
@@ -246,8 +249,7 @@ class BaseSourceView(BaseView):
             self.dbsession.delete(sel_source)
             self.dbsession.commit()
             self.populate_source_box()
-            self._update_selected_source()
-            self.reload()
+            self.load_source(None)
 
     def on_add_to_list(self):
         """Add the selected listings to a list."""

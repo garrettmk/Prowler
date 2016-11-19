@@ -1,6 +1,8 @@
 import re
 import json
 
+from fuzzywuzzy import fuzz
+
 from sqlalchemy.engine import Engine
 from sqlalchemy import create_engine, event
 from sqlalchemy import Table, Column, Integer, Float, String, DateTime, Boolean
@@ -46,6 +48,46 @@ def trunc(string, length=30):
         return ''
     return (string[:length - 3] + '...') if len(string) > length else string
 
+
+# Some methods to help determine link confidence
+def remove_symbols(string, repl=''):
+    return re.sub(r'[^a-zA-Z0-9\s]', repl, string)
+
+
+def brand_match(listing1, listing2):
+    fits = list()
+    brand1 = remove_symbols(listing1.brand or '').lower()
+    brand2 = remove_symbols(listing2.brand or '').lower()
+    title1 = remove_symbols(listing1.title or '').lower()
+    title2 = remove_symbols(listing2.title or '').lower()
+
+    fits.append(fuzz.partial_ratio(brand1, brand2))
+    fits.append(fuzz.partial_ratio(brand1, title2))
+    fits.append(fuzz.partial_ratio(brand2, title1))
+    return max(fits)
+
+
+def model_match(listing1, listing2):
+    fits = list()
+    model1 = remove_symbols(listing1.model or '').lower()
+    model2 = remove_symbols(listing2.model or '').lower()
+    title1 = remove_symbols(listing1.title or '').lower()
+    title2 = remove_symbols(listing2.title or '').lower()
+
+    if model1.isdigit() and model2.isdigit():
+        fits.append(100 * (model1 in model2 or model2 in model1))
+    else:
+        fits.append(fuzz.token_set_ratio(model1, model2))
+
+    fits.append(fuzz.token_set_ratio(model1, title2))
+    fits.append(fuzz.token_set_ratio(model2, title1))
+    return max(fits)
+
+
+def title_match(listing1, listing2):
+    title1 = str(listing1.title or '').lower()
+    title2 = str(listing2.title or '').lower()
+    return fuzz.token_set_ratio(title1, title2)
 
 # Database classes
 Base = declarative_base()
@@ -114,6 +156,7 @@ class AmazonCategory(Base):
     name = Column(String(collation='NOCASE'), nullable=False)
     scale = Column(Integer, default=1)
     product_category_id = Column(String)
+    product_groups = Column(String)
 
     def __repr__(self):
         return "<%s(name='%s')>" % (__class__, self.name)
@@ -142,8 +185,13 @@ class AmazonListing(Listing):
     category = relationship(AmazonCategory)
 
     merchant_id = Column(Integer, ForeignKey(AmazonMerchant.id))
+    merchant = relationship(AmazonMerchant)
 
     __mapper_args__ = {'polymorphic_identity': 'amz_listing'}
+
+    def __init__(self, **kwargs):
+        super(AmazonListing, self).__init__(**kwargs)
+        self.vendor_id = 0
 
     def __repr__(self):
         return "<%s(sku='%s', title='%s')>" % (__class__, self.sku, trunc(self.title))
@@ -212,6 +260,7 @@ class ListMembership(Base):
     listing_id = Column(Integer, ForeignKey(Listing.id, ondelete='CASCADE'), primary_key=True)
 
     list = relationship(List)
+    listing = relationship(Listing)
 
 
 class LinkedProducts(Base):
@@ -233,6 +282,13 @@ class LinkedProducts(Base):
     def __repr__(self):
         return "<%s(amz_listing_id='%s', vnd_listng_id='%s', confidence='%s')>" % \
                (__class__, self.amz_listing_id, self.vnd_listing_id, self.confidence)
+
+    def build_confidence(self):
+        """Compares the brand, model, and title of both listing and calculates match confidence."""
+        self.brand_match = brand_match(self.amz_listing, self.vnd_listing)
+        self.model_match = model_match(self.amz_listing, self.vnd_listing)
+        self.title_match = title_match(self.amz_listing, self.vnd_listing)
+        self.confidence = sum([self.brand_match * 2, self.model_match * 2, self.title_match]) / 5
 
 
 class Operation(Base):

@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import QWidget, QAbstractItemView, QDataWidgetMapper, QHead
 from PyQt5.QtWidgets import QMessageBox, QStackedWidget, QItemDelegate, QLineEdit, QFrame, QMenu, QAction, QTableView
 from PyQt5.QtWidgets import QVBoxLayout, QGraphicsItem
 from PyQt5.QtChart import QChartView, QChart, QDateTimeAxis, QValueAxis, QLineSeries, QScatterSeries
-from delegates import CurrencyDelegate, ReadOnlyDelegate
+from delegates import CurrencyDelegate, ReadOnlyDelegate, IntegerDelegate, BooleanDelegate, UTCtoLocalDelegate
 
 from database import *
 import dbhelpers
@@ -15,10 +15,9 @@ from operations import OperationsManager
 
 from prowlerwidgets import ProwlerTableWidget, ProductDetailsWidget
 from baseview import BaseSourceView
-from dialogs import WatchProductDialog, VndProductDialog, SearchAmazonDialog, SearchListingsDialog
+from dialogs import VndProductDialog, SearchAmazonDialog, SearchListingsDialog, SetWatchDialog
 
 from amz_product_details_ui import Ui_amzProductDetails
-from amz_product_sourcing_ui import Ui_amzProductSourcing
 
 
 class AmzProductDetailsWidget(ProductDetailsWidget, Ui_amzProductDetails):
@@ -26,7 +25,14 @@ class AmzProductDetailsWidget(ProductDetailsWidget, Ui_amzProductDetails):
 
     def __init__(self, parent=None):
         super(AmzProductDetailsWidget, self).__init__(parent=parent)
-        # setupUi() is called by the base class
+        # setupUi() is called by the parent class
+
+        # UI connections
+        self.watchCheck.stateChanged.connect(self.watchPeriod.setEnabled)
+        self.watchCheck.clicked.connect(self.modify_watch)
+        self.watchPeriod.editingFinished.connect(self.modify_watch)
+        self.watchCheck.setChecked(False)
+        self.watchPeriod.setEnabled(False)
 
         # Set up the data widget mapper
         self.mapper.addMapping(self.salesRankLine, self.model.fieldIndex('salesrank'))
@@ -36,13 +42,6 @@ class AmzProductDetailsWidget(ProductDetailsWidget, Ui_amzProductDetails):
         self.mapper.currentIndexChanged.connect(self.update_category)
         self.mapper.currentIndexChanged.connect(self.update_watch)
         self.mapper.currentIndexChanged.connect(self.update_prime)
-
-        # Connections
-        self.watchCheck.stateChanged.connect(self.watchPeriod.setEnabled)
-        self.watchCheck.clicked.connect(self.modify_watch)
-        self.watchPeriod.editingFinished.connect(self.modify_watch)
-        self.watchCheck.setChecked(False)
-        self.watchPeriod.setEnabled(False)
 
     def update_category(self):
         """Update the category line."""
@@ -74,7 +73,8 @@ class AmzProductDetailsWidget(ProductDetailsWidget, Ui_amzProductDetails):
         have_watch = self.watchCheck.checkState()
         watch_period = self.watchPeriod.value() * 60
 
-        dbhelpers.set_watch(self.dbsession, self.source, watch_period if have_watch else None)
+        dbhelpers.set_watch(self.dbsession, self.source.id, watch_period if have_watch else None)
+        self.dbsession.commit()
 
 
 class AmzHistoryTableWidget(ProwlerTableWidget):
@@ -92,6 +92,13 @@ class AmzHistoryTableWidget(ProwlerTableWidget):
         # Table setup
         self.table.horizontalHeader().setSectionResizeMode(self.model.fieldIndex('Merchant'), QHeaderView.Stretch)
         self.table.verticalHeader().hide()
+
+        # Display delegates
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Date/Time'), UTCtoLocalDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Sales Rank'), IntegerDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Offers'), IntegerDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Price'), CurrencyDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Prime'), BooleanDelegate(terms=['No', 'Yes'], parent=self))
 
     def generate_query(self, source):
         source_id = getattr(source, 'id', None)
@@ -261,6 +268,16 @@ class AmzProductLinksWidget(ProwlerTableWidget):
 
         self.set_source(None)
 
+        # Set the table to sort by price by default
+        self.table.sortByColumn(self.model.fieldIndex('Unit Price'), Qt.AscendingOrder)
+
+        # Display delegates
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Price'), CurrencyDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Quantity'), IntegerDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Unit Price'), CurrencyDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Tax Ea.'), CurrencyDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Ship Ea.'), CurrencyDelegate(parent=self))
+
         # Some context actions
         self.action_find_sources = QAction('Find sources...', self)
         self.action_find_sources.triggered.connect(self.on_find_sources)
@@ -271,15 +288,24 @@ class AmzProductLinksWidget(ProwlerTableWidget):
         self.add_context_actions([self.action_edit_src_listing,
                                   self.action_find_sources])
 
+    def set_source(self, source):
+        super(AmzProductLinksWidget, self).set_source(source)
+
+        # Hide the id column
+        self.table.setColumnHidden(self.model.fieldIndex('id'), True)
+
     def generate_query(self, source):
         """Return a SQLAlchemy query object, used to populate the table."""
         source_id = getattr(source, 'id', None)
 
         stmt = self.dbsession.query(LinkedProducts.confidence,
                                     VendorListing,
-                                    VendorListing.unit_price). \
+                                    VendorListing.unit_price,
+                                    Vendor.tax_rate,
+                                    Vendor.ship_rate). \
                               filter(LinkedProducts.vnd_listing_id == VendorListing.id,
-                                     LinkedProducts.amz_listing_id == source_id). \
+                                     LinkedProducts.amz_listing_id == source_id,
+                                     Vendor.id == VendorListing.vendor_id). \
                               subquery()
 
         query = self.dbsession.query(stmt.c.id.label('id'),
@@ -289,7 +315,9 @@ class AmzProductLinksWidget(ProwlerTableWidget):
                                      stmt.c.title.label('Title'),
                                      stmt.c.price.label('Price'),
                                      stmt.c.quantity.label('Quantity'),
-                                     stmt.c.unit_price.label('Unit Price')). \
+                                     stmt.c.unit_price.label('Unit Price'),
+                                     label('Tax Ea.', stmt.c.tax_rate * stmt.c.unit_price),
+                                     label('Ship Ea.', stmt.c.ship_rate * stmt.c.unit_price)). \
                                filter(Vendor.id == stmt.c.vendor_id)
         return query
 
@@ -304,9 +332,7 @@ class AmzProductLinksWidget(ProwlerTableWidget):
 
         vnd_ids = dialog.selected_ids
         for vnd_id in vnd_ids:
-            link = dbhelpers.link_products(self.dbsession, amz_id, vnd_id)
-            link.confidence = 100
-            self.dbsession.add(link)
+            dbhelpers.link_products_ids(self.dbsession, amz_id, vnd_id)
 
         self.dbsession.commit()
         self.reload()
@@ -321,14 +347,10 @@ class AmzProductLinksWidget(ProwlerTableWidget):
             return
 
         if selection is None:
-            amz_id = self.source.id
-            vnd_id = dialog.listing.id
-            link = dbhelpers.link_products(self.dbsession, amz_id, vnd_id)
-            link.confidence = 100
-            self.dbsession.add(link)
-            self.dbsession.commit()
+            dbhelpers.link_products(self.dbsession, self.source, dialog.listing)
 
-        self.product_links.reload()
+        self.dbsession.commit()
+        self.reload()
 
 
 class AmzPricingWidget(ProwlerTableWidget):
@@ -374,11 +396,18 @@ class AmzPricingWidget(ProwlerTableWidget):
         self.vnd_source = listing
         self.reload()
 
+    def set_source(self, source):
+        super(AmzPricingWidget, self).set_source(source)
+
+        # Hide the id column
+        self.table.setColumnHidden(self.model.fieldIndex('id'), True)
+
     def generate_query(self, source):
         amz_id = getattr(source, 'id', None)
 
         if self.source and self.vnd_source:
             vnd_cost = self.vnd_source.unit_price * self.source.quantity
+            vnd_cost += (vnd_cost * self.vnd_source.vendor.tax_rate) + (vnd_cost * self.vnd_source.vendor.ship_rate)
         else:
             vnd_cost = 0
 
@@ -486,6 +515,20 @@ class AmzSourceViewWidget(ProwlerTableWidget):
         self.set_source(None)
 
         # Table setup
+        self.table.verticalHeader().hide()
+
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Sales Rank'), IntegerDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Quantity'), IntegerDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Price'), CurrencyDelegate(parent=self))
+        self.table.setItemDelegateForColumn(self.model.fieldIndex('Prime'), BooleanDelegate(terms=['No', 'Yes'], parent=self))
+
+    def set_source(self, source):
+        super(AmzSourceViewWidget, self).set_source(source)
+
+        # Column setup
+        self.table.setColumnHidden(self.model.fieldIndex('id'), True)
+        self.table.resizeColumnsToContents()
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(self.model.fieldIndex('Title'), QHeaderView.Stretch)
 
     def generate_query(self, source):
@@ -496,6 +539,7 @@ class AmzSourceViewWidget(ProwlerTableWidget):
                                      AmazonListing.model.label('Model'),
                                      AmazonListing.quantity.label('Quantity'),
                                      AmazonListing.price.label('Price'),
+                                     AmazonListing.hasprime.label('Prime'),
                                      AmazonListing.title.label('Title')).\
                                 filter(Vendor.id == AmazonListing.vendor_id). \
                                 filter(AmazonListing.category_id == AmazonCategory.id)
@@ -513,12 +557,73 @@ class AmazonView(BaseSourceView):
 
     def __init__(self, parent=None):
         super(AmazonView, self).__init__(parent=parent)
+        self.setup_ui()
+
         self.shows_amazon = True
 
-        layout = QVBoxLayout(self)
-        self.setLayout(layout)
+        # Tell the parent class about our widgets
+        self.source_table_widget = self.source_view
+        self.product_details_widget = self.product_details
+        self.product_links_widget = self.product_links
 
-        # Create the main table
+        # Custom toolbar buttons
+        self.action_search_amazon.triggered.connect(self.on_search_amazon)
+
+        # Create context actions for the child widgets
+        self.action_show_hist_table = QAction('Show table')
+        self.action_show_hist_chart = QAction('Show chart')
+
+        self.action_show_hist_table.triggered.connect(self.on_show_hist_table)
+        self.action_show_hist_chart.triggered.connect(self.on_show_hist_chart)
+
+        self.action_open_camel3 = QAction(QIcon('icons/camel.png'), 'Open in CamelCamelCamel...', self)
+        self.action_open_camel3.triggered.connect(self.on_open_camel3)
+
+        self.action_set_watch = QAction(QIcon('icons/watch.png'), 'Set watch...', self)
+        self.action_set_watch.triggered.connect(self.on_set_watch)
+
+        # Add context actions to the child widgets
+        self.source_view.double_clicked.connect(self.action_open_in_browser.trigger)
+        self.source_view.add_context_actions([self.action_add_to_list,
+                                              self.action_remove_from_list,
+                                              self.action_set_watch,
+                                              self.action_open_in_browser,
+                                              self.action_open_camel3,
+                                              self.action_open_in_google,
+                                              self.action_lookup_upc])
+
+        self.product_links.double_clicked.connect(self.action_open_in_browser.trigger)
+        self.product_links.add_context_actions([self.action_unlink_products,
+                                                self.action_open_in_browser,
+                                                self.action_open_in_google,
+                                                self.action_lookup_upc])
+
+        self.product_details.openUrlBtn.clicked.connect(self.action_open_in_browser.trigger)
+        self.product_details.openGoogleBtn.clicked.connect(self.action_open_in_google.trigger)
+        self.product_details.openUPCLookupBtn.clicked.connect(self.action_lookup_upc.trigger)
+        self.product_details.openCamelBtn.clicked.connect(self.action_open_camel3.trigger)
+
+        self.history_table.add_context_action(self.action_show_hist_chart)
+        self.history_chart.add_context_action(self.action_show_hist_table)
+
+        # Connect to selection change on the product links widget
+        self.product_links.selection_changed.connect(self.on_link_selection_changed)
+
+        # Populate and go
+        self.on_show_hist_chart()
+        self.populate_source_box()
+        self.reload()
+
+    def setup_ui(self):
+        """Initialize the view's UI elements."""
+        # Set the main layout
+        self.setLayout(QVBoxLayout(self))
+
+        # Create toolbar actions
+        self.action_search_amazon = QAction(QIcon('icons/searchamazon.gif'), 'Search Amazon...', self)
+        self.add_toolbar_action(self.action_search_amazon)
+
+        # Create the source view table (the main table)
         self.source_view = AmzSourceViewWidget(self)
         self.layout().addWidget(self.source_view)
 
@@ -584,57 +689,6 @@ class AmazonView(BaseSourceView):
         sourcing_widget.setLayout(sourcing_layout)
         self.tabs.addTab(sourcing_widget, 'Sourcing')
 
-        # Tell the parent class about our widgets
-        self.source_table_widget = self.source_view
-        self.product_details_widget = self.product_details
-        self.product_links_widget = self.product_links
-
-        # Custom toolbar buttons
-        self.action_search_amazon = QAction(QIcon('icons/searchamazon.gif'), 'Search Amazon...', self)
-        self.action_search_amazon.triggered.connect(self.on_search_amazon)
-
-        self.add_toolbar_action(self.action_search_amazon)
-
-        # Create context actions
-        self.action_show_hist_table = QAction('Show table')
-        self.action_show_hist_chart = QAction('Show chart')
-
-        self.action_show_hist_table.triggered.connect(self.on_show_hist_table)
-        self.action_show_hist_chart.triggered.connect(self.on_show_hist_chart)
-
-        self.action_open_camel3 = QAction(QIcon('icons/camel.png'), 'Open in CamelCamelCamel...', self)
-        self.action_open_camel3.triggered.connect(self.on_open_camel3)
-
-        # Set context actions
-        self.source_view.double_clicked.connect(self.action_open_in_browser.trigger)
-        self.source_view.add_context_actions([self.action_add_to_list,
-                                              self.action_remove_from_list,
-                                              self.action_open_in_browser,
-                                              self.action_open_camel3,
-                                              self.action_open_in_google,
-                                              self.action_lookup_upc])
-
-        self.product_links.double_clicked.connect(self.action_open_in_browser.trigger)
-        self.product_links.add_context_actions([self.action_unlink_products,
-                                                self.action_open_in_browser,
-                                                self.action_open_in_google,
-                                                self.action_lookup_upc])
-
-        self.product_details.openUrlBtn.clicked.connect(self.action_open_in_browser.trigger)
-        self.product_details.openGoogleBtn.clicked.connect(self.action_open_in_google.trigger)
-        self.product_details.openUPCLookupBtn.clicked.connect(self.action_lookup_upc.trigger)
-        self.product_details.openCamelBtn.clicked.connect(self.action_open_camel3.trigger)
-
-        self.history_table.add_context_action(self.action_show_hist_chart)
-        self.history_chart.add_context_action(self.action_show_hist_table)
-
-        # Connect to selection change on the product links widget
-        self.product_links.selection_changed.connect(self.on_link_selection_changed)
-
-        # Populate and go
-        self.populate_source_box()
-        self.reload()
-
     def on_main_selection_changed(self):
         """Update child widgets when the selection in the main table changes."""
         super(AmazonView, self).on_main_selection_changed()
@@ -645,18 +699,24 @@ class AmazonView(BaseSourceView):
         self.history_chart.set_source(selection)
         self.product_pricing.set_source(selection)
 
+        # Select the first linked vendor by default
+        self.product_links.table.selectRow(0)
+
     def on_link_selection_changed(self):
         """Update the pricing widget when a vendor source is selected."""
         selection = self.dbsession.query(VendorListing).filter_by(id=self.product_links.get_selected_id()).first()
         self.product_pricing.set_vnd_source(selection)
 
     def on_show_hist_table(self):
+        """Show the product history table."""
         self.history_stack.setCurrentWidget(self.history_table)
 
     def on_show_hist_chart(self):
+        """Show the product history chart."""
         self.history_stack.setCurrentWidget(self.history_chart)
 
     def on_search_amazon(self):
+        """Create a SearchAmazon operation."""
         dialog = SearchAmazonDialog(self)
         ok = dialog.exec_()
 
@@ -676,9 +736,12 @@ class AmazonView(BaseSourceView):
         self.dbsession.commit()
 
     def search_amazon_callback(self, op):
+        """Re-populate the source box when a SearchAmazon operation has finished. Refresh the source view if
+        search results were added.
+        """
         self.populate_source_box()
 
-        if op.params['addtolist'] == self.selected_source.name:
+        if self.selected_source and op.params['addtolist'] == self.selected_source.name:
             self.reload()
 
     def on_open_camel3(self):
@@ -686,6 +749,19 @@ class AmazonView(BaseSourceView):
         sku = self.dbsession.query(Listing.sku).filter_by(id=self.get_selected_id()).scalar()
         webbrowser.open('http://camelcamelcamel.com/search?sq=%s' % sku)
 
+    def on_set_watch(self):
+        """Modify the watch(es) on the listings selected in the source view."""
+        dialog = SetWatchDialog(self)
+        ok = dialog.exec_()
+        if not ok:
+            return
+
+        time = dialog.period * 60 if dialog.has_watch else None
+
+        for listing_id in self.source_view.selected_ids:
+            dbhelpers.set_watch(self.dbsession, listing_id, time)
+
+        self.dbsession.commit()
 
 
 

@@ -1,4 +1,4 @@
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QDateTime
 from PyQt5.QtWidgets import QItemDelegate, QStyledItemDelegate, QComboBox, QLineEdit, QDoubleSpinBox, QAbstractSpinBox
 from PyQt5.QtGui import QValidator, QDoubleValidator
 
@@ -223,3 +223,15 @@ class DataMapperDelegate(QItemDelegate):
                 widget.setValue(data)
         elif isinstance(widget, QLineEdit):
             widget.setText(str(data))
+
+
+class UTCtoLocalDelegate(QStyledItemDelegate):
+    """Delegate for converting naive time strings from UTC to local time."""
+
+    def __init__(self, parent=None):
+        super(UTCtoLocalDelegate, self).__init__(parent=parent)
+
+    def displayText(self, value, locale):
+        dt = QDateTime.fromString(value, Qt.ISODate)
+        dt.setTimeSpec(Qt.UTC)
+        return dt.toLocalTime().toString(Qt.TextDate)

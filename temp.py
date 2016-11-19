@@ -7,9 +7,9 @@ Base.metadata.create_all(bind=engine)
 Session = sessionmaker(bind=engine)
 session = Session()
 
-amazon = Vendor(name='Amazon')
-acme = Vendor(name='ACME')
-acorp = Vendor(name='ACorp')
+amazon = Vendor(name='Amazon', id=0)
+acme = Vendor(name='ACME', tax_rate=.09, ship_rate=.3)
+acorp = Vendor(name='ACorp', tax_rate=0, ship_rate=.8)
 
 
 session.add_all([amazon, acme, acorp])
@@ -22,7 +22,7 @@ amz1 = AmazonListing(vendor_id=amazon.id, sku='A12345', price=24.99, quantity=1)
 amz2 = AmazonListing(vendor_id=amazon.id, sku='B12345', price=29.99, quantity=1)
 link1 = LinkedProducts(amz_listing=amz1, vnd_listing=vnd1)
 link2 = LinkedProducts(amz_listing=amz1, vnd_listing=vnd2)
-link3 = LinkedProducts(amz_listing=amz2, vnd_listing=vnd3)
+link3 = LinkedProducts(amz_listing=amz1, vnd_listing=vnd3)
 
 price1 = AmzPriceAndFees(amz_listing=amz1, price=24.99)
 price2 = AmzPriceAndFees(amz_listing=amz1, price=31.99)
@@ -43,3 +43,6 @@ def listener(session):
     print('Change in Operation table detected.')
 
 listen(session, 'before_commit', listener)
+
+
+

@@ -1,28 +1,34 @@
+from PyQt5.QtGui import QIcon
+from PyQt5.QtWidgets import QMainWindow, QTabWidget, QAction, QToolBar, QApplication
 from PyQt5.QtSql import QSqlDatabase
-from PyQt5.QtWidgets import QMainWindow, QTabWidget
 
 from database import *
 
-from mainwindow_ui import Ui_MainWindow
-from operations import OperationsManager
 from amazonview import AmazonView
 from vendorview import VendorView
 from operationsview import OperationsView
 
+from dialogs import EditVendorDialog
 
-class MainWindow(QMainWindow, Ui_MainWindow):
+
+class MainWindow(QMainWindow):
 
     def __init__(self, parent=None):
         super(MainWindow, self).__init__(parent)
-        self.setupUi(self)
+        self.setup_ui()
 
         # UI connections
-        self.actionOpen_Amazon_view.triggered.connect(self.open_amazon)
-        self.actionOpen_Vendor_view.triggered.connect(self.open_vendor)
-        self.actionOpen_Operations_view.triggered.connect(self.open_operations)
+        self.action_open_amazon_view.triggered.connect(self.open_amazon)
+        self.action_open_vendor_view.triggered.connect(self.open_vendor)
+        self.action_open_operations.triggered.connect(self.open_operations)
+        self.action_edit_vendors.triggered.connect(self.on_edit_vendors)
 
-        # Set up the database connections
-        # TODO: Add some error checking
+        self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.tabs.currentChanged.connect(self.tab_changed)
+
+        self.current_tab = None
+
+        # Set up the database connections. One for SQLAlchemy, one for Qt
         self.dbengine = create_engine('sqlite:///prowler.db')
         self.dbsession = Session(bind=self.dbengine)
 
@@ -32,40 +38,66 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.dbsession.add(self.dbsession.merge(amazon))
         self.dbsession.commit()
 
+        # The Qt connection is only ever used for displaying query results in tables. Opening it as read-only may
+        # help limit conflicts between Qt and SQLAlchemy
         db = QSqlDatabase.addDatabase('QSQLITE')
         db.setConnectOptions('QSQLITE_OPEN_READONLY')
         db.setDatabaseName('prowler.db')
         db.open()
 
-        # Set up the operations manager
-        self.opsman = OperationsManager.get_instance(self)
+    def setup_ui(self):
+        """Initialize the main window's UI components"""
+        # Scale the window to the size of the screen
+        desktop = QApplication.desktop()
+        size = desktop.availableGeometry()
+
+        self.resize(size.width() * .9, size.height() * .9)
 
         # Set up the toolbar
-        self.toolBar.addAction(self.actionOpen_Amazon_view)
-        self.toolBar.addAction(self.actionOpen_Vendor_view)
-        self.toolBar.addAction(self.actionOpen_Operations_view)
+        self.toolBar = QToolBar(self)
+        self.addToolBar(self.toolBar)
+
+        # Create toolbar actions
+        self.action_open_amazon_view = QAction(QIcon('icons/amazon.png'), 'Open Amazon view', self)
+        self.action_open_vendor_view = QAction(QIcon('icons/folder.png'), 'Open Vendor view', self)
+        self.action_open_operations = QAction(QIcon('icons/ops_view.png'), 'Open Operations', self)
+        self.action_edit_vendors = QAction(QIcon('icons/vendor.png'), 'Edit vendors', self)
+
+        # Add actions and separators to the toolbar
+        self.toolBar.addActions([self.action_open_amazon_view,
+                                self.action_open_vendor_view,
+                                self.action_open_operations])
+
+        self.toolBar.addSeparator()
+        self.toolBar.addAction(self.action_edit_vendors)
         self.toolBar.addSeparator()
 
-        # Set up the tab widget
+        # Create the central tab widget
         self.tabs = QTabWidget(self)
         self.tabs.setDocumentMode(True)
         self.tabs.setTabsClosable(True)
+
         self.setCentralWidget(self.tabs)
-        self.tabs.tabCloseRequested.connect(self.close_tab)
-        self.tabs.currentChanged.connect(self.tab_changed)
-        self.current_tab = None
+
+    def on_edit_vendors(self):
+        """Show the Edit Vendors dialog."""
+        dialog = EditVendorDialog(parent=self)
+        dialog.exec()
 
     def open_amazon(self):
+        """Open a new AmazonView."""
         view = AmazonView(self)
         idx = self.tabs.addTab(view, 'Amazon')
         self.tabs.setCurrentIndex(idx)
 
     def open_vendor(self):
+        """Open a new VendorView."""
         view = VendorView(self)
         idx = self.tabs.addTab(view, 'Sources')
         self.tabs.setCurrentIndex(idx)
 
     def open_operations(self):
+        """Open, or re-focus, the Operations view."""
         # We only want one operations view open at a time
         for i in range(self.tabs.count()):
             if isinstance(self.tabs.widget(i), OperationsView):
@@ -77,9 +109,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.tabs.setCurrentIndex(idx)
 
     def close_tab(self, index):
+        """Respond to a tabCloseRequested signal."""
         self.tabs.removeTab(index)
 
     def tab_changed(self, index):
+        """Re-populate the toolbar with the actions specific to the new tab."""
         if self.current_tab:
             for action in self.current_tab.toolbar_actions:
                 self.toolBar.removeAction(action)
