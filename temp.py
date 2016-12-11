@@ -33,6 +33,7 @@ amz1.category = cat1
 session.add_all([vnd1, vnd2, vnd3, amz1, link1, link2, price1, price2])
 session.commit()
 
+
 def listener(session):
     for item in chain(session.new, session.dirty, session.deleted):
         if isinstance(item, Operation):
@@ -46,3 +47,34 @@ listen(session, 'before_commit', listener)
 
 
 
+import amazonmws as mws
+import mwskeys, pakeys
+import requests
+
+mwsapi = mws.Products(mwskeys.accesskey, mwskeys.secretkey, mwskeys.sellerid)
+mwsapi.make_request = requests.request
+
+paapi = mws.ProductAdvertising(pakeys.accesskey, pakeys.secretkey, pakeys.associatetag)
+paapi.make_request = requests.request
+
+
+from database import *
+from dbhelpers import *
+
+from sqlalchemy.sql import alias
+
+engine = create_engine('sqlite:///prowler_copy.db')
+Base.metadata.create_all(bind=engine)
+Session = sessionmaker(bind=engine)
+session = Session()
+
+prod = session.query(AmazonListing).filter_by(sku='B00XLMX4KC').one()
+hist = ProductHistoryStats(session, prod.id)
+
+
+def slope(one, two):
+    scale = 1 - (min(one, two) / max(one, two))
+    return scale, scale * (two - one) / 3600
+
+for one, two in [(103000, 14000), (18000, 8000), (3200, 2800), (100000, 90000)]:
+    print(slope(one, two))

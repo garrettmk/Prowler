@@ -1,4 +1,5 @@
 import arrow
+from datetime import datetime, timedelta
 import amazonmws as mws
 import mwskeys, pakeys
 
@@ -217,7 +218,7 @@ class OperationsManager(QObject):
         elif op.error:
             status_message += ', error: %s' % op.message
         elif not op.complete and not op.error:
-            status_message += ': %s' % op.message if op.message else ''
+            status_message += ': %s' % op.message or ''
 
         self.status_message.emit(status_message)
 
@@ -298,7 +299,7 @@ class OperationsManager(QObject):
             op.complete = True
             return
 
-        min_confidence = getattr(params, 'confidence', 0)
+        min_confidence = params.get('confidence', 0)
 
         # Get the lowest vendor cost available
         vnd_unit_cost = self.dbsession.query(func.min(VendorListing.unit_price * (1 + Vendor.tax_rate + Vendor.ship_rate))).\
@@ -321,22 +322,15 @@ class OperationsManager(QObject):
             return
 
         # Now get fees
-        price_point = self.dbsession.query(AmzPriceAndFees).\
-                                     filter_by(amz_listing_id=amz_listing.id,
-                                               price=amz_listing.price).\
-                                     first()
-        if price_point is None:
-            price_point = AmzPriceAndFees(amz_listing=amz_listing, price=amz_listing.price)
-            self.dbsession.add(price_point)
+        price_point = dbhelpers.get_or_create(self.dbsession, AmzPriceAndFees, amz_listing_id=amz_listing.id,
+                                              price=amz_listing.price)
 
         if price_point.fba is None:
             self.GetMyFeesEstimate(op)
 
-        fba, prep, ship = self.dbsession.query(func.ifnull(AmzPriceAndFees.fba, amz_listing.price * .25),
-                                               func.ifnull(AmzPriceAndFees.prep, 0),
-                                               func.ifnull(AmzPriceAndFees.ship, 0)).\
-                                         filter_by(amz_listing_id=amz_listing.id, price=amz_listing.price).\
-                                         first()
+        fba = price_point.fba or amz_listing.price * .25
+        prep = price_point.prep or 0
+        ship = price_point.ship or 0
 
         # Calculate the margin
         cost = vnd_unit_cost * amz_listing.quantity + prep + ship
@@ -347,14 +341,8 @@ class OperationsManager(QObject):
             return
 
         # Add to the list
-        add_list = self.dbsession.query(List).filter_by(name=params['list']).first()
-        if add_list is None:
-            add_list = List(name=params['list'], is_amazon=True)
-            self.dbsession.add(add_list)
-            self.dbsession.flush()
+        dbhelpers.add_ids_to_list(self.dbsession, listing_ids=[amz_listing.id], list_name=params['list'])
 
-        self.dbsession.add(self.dbsession.merge(ListMembership(list_id=add_list.id,
-                                                               listing_id=amz_listing.id)))
         op.complete = True
 
     def SearchAmazon(self, op):
@@ -518,6 +506,18 @@ class OperationsManager(QObject):
             return
 
         parser = ItemLookupParser(r.readAll().data().decode())
+        product = parser.product
+
+        if product:
+            product.update(amz_listing)
+        else:
+            code = parser.xpath_get('.//Error/Code')
+            message = parser.xpath_get('.//Error/Message')
+
+            op.error = True
+            op.message = 'ItemLookup failed for ASIN %s: %s. %s' % (amz_listing.sku, code, message)
+            return
+
         parser.product.update(amz_listing)
 
         # Update the merchant
@@ -564,8 +564,10 @@ class OperationsManager(QObject):
                                                  offers=amz_listing.offers,
                                                  timestamp=func.now()))
 
+        op.message = None
+
         if 'repeat' in params and params['repeat'] > 0:
-            op.scheduled = arrow.utcnow().replace(minutes=params['repeat']).naive
+            op.scheduled = datetime.utcnow() + timedelta(minutes=params['repeat'])
         else:
             op.complete = True
 

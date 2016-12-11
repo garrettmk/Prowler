@@ -42,6 +42,7 @@ class BaseSourceView(BaseView):
         self._product_details_widget = None
         self._product_links_widget = None
         self._selected_source = None
+        self._last_add_list = None
 
         # Set up the source selector
         self.sourceBox = QComboBox(self)
@@ -260,14 +261,18 @@ class BaseSourceView(BaseView):
         first = self.dbsession.query(Listing).filter_by(id=selected_ids[0]).first()
         is_amz = isinstance(first, AmazonListing)
 
-        dialog = SelectListDialog(show_amazon=is_amz, readonly=False, parent=self)
+        dialog = SelectListDialog(title='Add to list',
+                                  show_amazon=is_amz,
+                                  default=self._last_add_list,
+                                  readonly=False,
+                                  parent=self)
         ok = dialog.exec_()
         if not ok:
             return
-
         dbhelpers.add_ids_to_list(self.dbsession, selected_ids, dialog.list_name)
         self.dbsession.commit()
         self.populate_source_box()
+        self._last_add_list = dialog.list_name
 
     def on_remove_from_list(self):
         """Removes the selected listings from a list."""
@@ -275,10 +280,16 @@ class BaseSourceView(BaseView):
         if not selected_ids:
             return
 
+        source_name = getattr(self.selected_source, 'name', None)
+
         first = self.dbsession.query(Listing).filter_by(id=selected_ids[0]).first()
         is_amz = isinstance(first, AmazonListing)
 
-        dialog = SelectListDialog(show_amazon=is_amz, readonly=True, parent=self)
+        dialog = SelectListDialog(title='Remove from list',
+                                  default=source_name,
+                                  show_amazon=is_amz,
+                                  readonly=True,
+                                  parent=self)
         ok = dialog.exec_()
         if not ok:
             return

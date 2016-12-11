@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import QWidget
 from PyQt5.QtSql import QSqlTableModel
 
 from database import *
+from prowlerwidgets import AlchemyTableModel
 
 from selectlist_ui import Ui_selectListDialog
 from importcsv_ui import Ui_ImportCSV
@@ -379,24 +380,32 @@ class OperationDialog(QDialog, Ui_opsDialog):
 class SelectListDialog(QDialog, Ui_selectListDialog):
     """A simple dialog for specifying a list name."""
 
-    def __init__(self, show_amazon=False, readonly=False, parent=None):
+    def __init__(self, title='Select List', show_amazon=False, readonly=False, default=None, parent=None):
         """Initialize the dialog. If show_amazon is True, show only lists of Amazon listings. If readonly is True,
         disable editing in the list name combo box.
         """
         super(SelectListDialog, self).__init__(parent=parent)
         self.setupUi(self)
-
         session = Session()
 
-        list_names = [result.name for result in session.query(List.name).filter_by(is_amazon=show_amazon)]
-        self.listNameBox.addItems(list_names)
+        self.setWindowTitle(title)
 
+        list_names = [result.name for result in session.query(List.name).filter_by(is_amazon=show_amazon)]
+
+        self.listNameBox.addItems(list_names)
         self.listNameBox.setEditable(not readonly)
+        self.listNameBox.setCurrentText(default)
+        self.listNameBox.currentTextChanged.connect(self.maybe_enable_ok)
+
+        self.maybe_enable_ok()
 
     @property
     def list_name(self):
         """Return the text of the list name combo box."""
         return self.listNameBox.currentText()
+
+    def maybe_enable_ok(self):
+        self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(bool(self.listNameBox.currentText()))
 
 
 class VndProductDialog(QDialog, Ui_vndProductDialog):
@@ -545,7 +554,7 @@ class SearchListingsDialog(QDialog, Ui_searchListingsDialog):
         self.sourceBox.addItems(list_names)
 
         # Set up the main table and model
-        self.resultsModel = QSqlTableModel(self)
+        self.resultsModel = AlchemyTableModel(self)
         self.resultsTable.setModel(self.resultsModel)
 
         # Populate the table headers
@@ -591,10 +600,7 @@ class SearchListingsDialog(QDialog, Ui_searchListingsDialog):
                 if list_id:
                     query = query.join(ListMembership).filter_by(list_id=list_id)
 
-        qt_query = saquery_to_qtquery(query)
-        qt_query.exec_()
-        self.resultsModel.setQuery(qt_query)
-        self.resultsModel.select()
+        self.resultsModel.query = query
 
     def keyPressEvent(self, event):
         """Override the return key to perform a search, instead of accepting the dialog."""

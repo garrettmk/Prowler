@@ -31,6 +31,14 @@ class VndProductDetailsWidget(ProductDetailsWidget, Ui_vendorListingDetails):
         # Edit vendor
         self.openVendorBtn.clicked.connect(self.on_edit_vendor)
 
+    def generate_query(self, source):
+        """Build a query object to use for populating the data mapper."""
+        vnd_id = getattr(source, 'id', None)
+        return self.dbsession.query(VendorListing.title, VendorListing.brand, VendorListing.model,
+                                    VendorListing.sku, VendorListing.upc, VendorListing.price,
+                                    VendorListing.quantity, VendorListing.url, VendorListing.updated).\
+                              filter_by(id=vnd_id)
+
     def update_vendor(self):
         """Manually update the vendor name field. It isn't covered by the data mapper."""
         vnd_name = self.source.vendor.name if self.source else ''

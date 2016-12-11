@@ -1,8 +1,61 @@
 import re
+import itertools
+
 from lxml import etree
 
 from database import *
 import dbhelpers
+
+
+# Attempt to translate a 'human-friendly' quantity to a number
+def read_quantity(string, pairs_singular=False):
+    string = string.lower()
+
+    # Match 'container' words, abbreviations and plurals. Ex: matches 'pk', 'pks', 'pack', or 'packs'
+    containers = r'(?:(?<![a-z])(?:package|pack|pk|case|cs|set|st|boxe|box|bx|count|ct|carton|bag|bg|roll|rl|sleeve|quantity)s?(?![a-z]))'
+
+    # Match 'multiplier' words, abbreviations, and plurals. Ex: matches 'dz', 'dzs', 'dozen', or 'dozens'
+    multipliers = r'(?:(?<![a-z])(?P<mult>ea|each|pc|piece|pr|pair|dz|dozen)s?(?![a-z]))'
+
+    # Match numbers given in the plain form, comma-separated, and optionally enclosed in parentheses. Ex: (1,000)
+    numbers = r'\(?(?P<num>\d[\d,]*)\)?'
+
+    # Match "(container) of/consists of (quantity)" phrases
+    r1 = re.compile(r'{container}(?:\s+consists?)?(?:\s+of)\s*{number}\s*{multiplier}?'\
+                    .format(container=containers, number=numbers, multiplier=multipliers),
+                    re.IGNORECASE)
+
+    # Match "(quantity) (per) (container)" phrases
+    r2 = re.compile(r'{number}\s*{multiplier}?(?:\s*[a-z]+)?\s*(?:per|/|-| )?\s*{container}'\
+                    .format(number=numbers, multiplier=multipliers, container=containers),
+                    re.IGNORECASE)
+
+    # Match "(quantity)(multiplier)" as in '2 dozen' or '6 each'
+    r3 = re.compile(r'{number}\s*[-/]?\s*{multiplier}(?![a-z])'\
+                    .format(number=numbers, multiplier=multipliers),
+                    re.IGNORECASE)
+
+    # Sometimes it's useful to consider a 'pair' as one item. Like a pair of shoes.
+    pair_value = 1 if pairs_singular else 2
+    mult_lookup = {'ea': 1, 'each': 1, 'pc': 1, 'piece': 1, 'pr': pair_value, 'pair': pair_value, 'dz': 12, 'dozen': 12}
+
+    quants = []
+    for match in itertools.chain(r1.finditer(string), r2.finditer(string), r3.finditer(string)):
+        num = int(match.group('num').replace(',', ''))
+        mult = mult_lookup.get(match.group('mult'), 1)
+        quants.append(num * mult)
+
+    if not quants:
+        return None
+
+    # Calculate the modes (plural) of the quantities, and choose the largest one
+    most = max(list(map(quants.count, quants)))
+    modes = list(set(filter(lambda x: quants.count(x) == most, quants)))
+
+    if modes:
+        return max(modes)
+    else:
+        return max(quants)
 
 
 class ParseError(Exception):
@@ -44,7 +97,7 @@ class XmlResponseElement:
         return response
 
 
-class AmzResponseParser:
+class AmzResponseParser(XmlResponseElement):
     """Base class for parsing XML responses from the Amazon MWS or Product Advertising APIs."""
 
     # Regexes for removing namespaces from the XML - makes it easier to parse
@@ -53,6 +106,8 @@ class AmzResponseParser:
     re_ns_close = re.compile(r'/\w+:')
 
     def __init__(self, xml):
+        super(AmzResponseParser, self).__init__()
+
         try:
             tree = etree.fromstring(self._remove_namespace(xml))
         except Exception as e:
@@ -135,28 +190,11 @@ class ProductParser(XmlResponseElement):
         quantities.append(max(self.xpath_get('.//NumberOfItems', dtype=int, default=1),
                               self.xpath_get('.//PackageQuantity', dtype=int, default=1)))
 
-
-        # Match "pack of" "case of" "box of" etc.
-        r1 = re.compile(r'(?:pack|pk|case|cs|set|box|bx|count|ct) of (\d+[\d,]*)', re.IGNORECASE)
-        # Match "per box" "x dozen" "x units per case" "10-pack" "50/ct" etc
-        r2 = re.compile(r'(\d+[\d,]*)\s*\w*(?:[/\- ]*|\s*per\s*)(piece|pc|pack|pk|case|cs|set|box|bx|dozen|dz|count|ct)', re.IGNORECASE)
-
+        # Check the title and 'features' section
         features = [tag.text for tag in self._tag.iterdescendants('Feature')]
         features.append(self.title)
 
-        for feature in features:
-
-            match = r1.search(feature)
-            if match:
-                quantities.append(int(match.group(1).replace(',', '')))
-
-            match = r2.search(feature)
-            if match:
-                dz = match.group(2).lower()
-                mult = 12 if dz == 'dozen' or dz == 'dz' else 1
-                quantities.append(int(match.group(1).replace(',', '')) * mult)
-
-        return max(quantities)
+        return max(*quantities, read_quantity(' '.join(features)) or 1)
 
     @property
     def offers(self):
@@ -193,8 +231,6 @@ class ListMatchingProductsParser(AmzResponseParser):
             yield ProductParser(tag)
 
 
-
-
 class MWSResponseParser:
     """Base class for the response parsers. Provides methods for parsing XML."""
 
@@ -226,7 +262,7 @@ class MWSResponseParser:
             return default
 
 
-class ErrorResponseParser(AmzResponseParser, XmlResponseElement):
+class ErrorResponseParser(AmzResponseParser):
     """Provides information from an error response."""
 
     @property

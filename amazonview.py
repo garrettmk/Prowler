@@ -1,6 +1,9 @@
+import itertools
 import webbrowser
 
-from PyQt5.QtCore import Qt, QDateTime, QPointF
+from datetime import datetime, timedelta, timezone
+
+from PyQt5.QtCore import Qt, QDateTime, QPointF, QEvent
 from PyQt5.QtGui import QIcon, QPainter, QColor
 from PyQt5.QtWidgets import QWidget, QAbstractItemView, QDataWidgetMapper, QHeaderView, QTabWidget, QHBoxLayout
 from PyQt5.QtWidgets import QMessageBox, QStackedWidget, QItemDelegate, QLineEdit, QFrame, QMenu, QAction, QTableView
@@ -42,6 +45,15 @@ class AmzProductDetailsWidget(ProductDetailsWidget, Ui_amzProductDetails):
         self.mapper.currentIndexChanged.connect(self.update_category)
         self.mapper.currentIndexChanged.connect(self.update_watch)
         self.mapper.currentIndexChanged.connect(self.update_prime)
+
+    def generate_query(self, source):
+        """Generate a query to use for populating the data mapper."""
+        amz_id = getattr(source, 'id', None)
+
+        return self.dbsession.query(AmazonListing.title, AmazonListing.brand, AmazonListing.model,
+                                    AmazonListing.sku, AmazonListing.upc, AmazonListing.price,
+                                    AmazonListing.quantity, AmazonListing.salesrank, AmazonListing.offers).\
+                              filter_by(id=amz_id)
 
     def update_category(self):
         """Update the category line."""
@@ -124,6 +136,10 @@ class AmzHistoryChart(QWidget):
 
         self.dbsession = Session()
         self.context_menu_actions = []
+        self._avg_pointspan = 0
+        self._max_points = 100
+        self.source = None
+        self.history = None
 
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -138,6 +154,7 @@ class AmzHistoryChart(QWidget):
         self.chart = QChart()
         self.chart.legend().hide()
         self.chart.setFlags(QGraphicsItem.ItemIsFocusable | QGraphicsItem.ItemIsSelectable)
+        self.chart.installEventFilter(self)
         self.chart_view.setChart(self.chart)
 
         self.layout().addWidget(self.chart_view)
@@ -151,6 +168,8 @@ class AmzHistoryChart(QWidget):
         self.timeAxis.setFormat('M/dd hh:mm')
         self.timeAxis.setTitleText('Date/Time')
         self.chart.addAxis(self.timeAxis, Qt.AlignBottom)
+
+        self.timeAxis.minChanged.connect(self.on_timeaxis_min_changed)
 
         self.rankAxis = QValueAxis()
         self.rankAxis.setLabelFormat('%\'i')
@@ -179,6 +198,12 @@ class AmzHistoryChart(QWidget):
         self.priceLine.attachAxis(self.priceAxis)
         self.priceLine.setColor(pcolor)
 
+        self.salesPoints = QScatterSeries()
+        self.chart.addSeries(self.salesPoints)
+        self.salesPoints.attachAxis(self.timeAxis)
+        self.salesPoints.attachAxis(self.rankAxis)
+        self.salesPoints.setColor(ocolor)
+
     def add_context_action(self, action):
         """Add an action to the chart's context menu."""
         self.context_menu_actions.append(action)
@@ -202,18 +227,80 @@ class AmzHistoryChart(QWidget):
     def set_source(self, source):
         """Set the source listing for the graph."""
         self.source = source
-        amz_id = getattr(source, 'id', None)
 
         # Update the chart
         self.rankLine.clear()
         self.priceLine.clear()
+        self.salesPoints.clear()
+        self.history = None
 
-        for row in self.dbsession.query(AmzProductHistory).filter_by(amz_listing_id=amz_id):
-            time = row.timestamp.timestamp() * 1000
+        start_date = datetime.utcnow() - timedelta(days=5)
+        self.load_history_from(start_date)
+
+        self.reset_axes()
+
+    def load_history_from(self, start_date=datetime.utcfromtimestamp(0)):
+        """Load history data from start-present."""
+        if not self.source:
+            self._avg_pointspan = 0
+            return
+
+        # Get the earliest point already in the chart
+        points = self.rankLine.pointsVector()
+
+        if points:
+            # The chart is drawn right-to-left, so the last point is the earliest point
+            earliest_msecs = points[-1].x()
+            earliest = datetime.fromtimestamp(earliest_msecs / 1000, timezone.utc)
+
+            if earliest <= start_date:
+                return
+
+        else:
+            earliest = datetime.now(timezone.utc)
+
+        # Get the product history stats if we don't already have them
+        if self.history is None:
+            self.history = dbhelpers.ProductHistoryStats(self.dbsession, self.source.id)
+
+        # Start adding points to the chart
+        last_row = None
+        for row in self.dbsession.query(AmzProductHistory).\
+                                  filter(AmzProductHistory.amz_listing_id == self.source.id,
+                                         AmzProductHistory.timestamp > start_date.replace(tzinfo=None) - timedelta(days=1),
+                                         AmzProductHistory.timestamp < earliest.replace(tzinfo=None)).\
+                                  order_by(AmzProductHistory.timestamp.desc()):
+
+            # SqlAlchemy returns naive timestamps
+            time = row.timestamp.replace(tzinfo=timezone.utc).timestamp() * 1000
+
             self.rankLine.append(time, row.salesrank or 0)
             self.priceLine.append(time, row.price or 0)
 
-        self.reset_axes()
+            if last_row:
+                # It's possible for salesrank to be None
+                try:
+                    slope = (last_row.salesrank - row.salesrank) / (last_row.timestamp.timestamp() - row.timestamp.timestamp())
+                    if slope < -0.3:
+                        self.salesPoints.append(last_row.timestamp.replace(tzinfo=timezone.utc).timestamp() * 1000,
+                                                last_row.salesrank)
+                except (TypeError, AttributeError):
+                    pass
+
+            last_row = row
+
+        # Calculate the average span between points
+        spans = 0
+        for p1, p2 in itertools.zip_longest(itertools.islice(points, 0, None, 2), itertools.islice(points, 1, None, 2)):
+            if p1 and p2: spans += abs(p1.x() - p2.x())
+
+        self._avg_pointspan = spans // 2
+
+    def on_timeaxis_min_changed(self, min):
+        """Respond to a change in the time axis' minimum value."""
+        # toTime_t() converts to UTC automatically
+        utc_min = datetime.fromtimestamp(min.toTime_t(), timezone.utc)
+        self.load_history_from(start_date=utc_min)
 
     def reset_axes(self):
         """Resets the chart axes."""
@@ -257,6 +344,25 @@ class AmzHistoryChart(QWidget):
         self.rankAxis.setMax(rmax)
         self.priceAxis.setMin(pmin)
         self.priceAxis.setMax(pmax)
+
+    def eventFilter(self, watched, event):
+        """Intercept and handle mouse events."""
+        if event.type() == QEvent.GraphicsSceneWheel and event.orientation() == Qt.Vertical:
+            factor = 0.95 if event.delta() < 0 else 1.05
+            self.chart.zoom(factor)
+            return True
+
+        if event.type() == QEvent.GraphicsSceneMouseDoubleClick:
+            self.chart.zoomReset()
+            self.reset_axes()
+            return True
+
+        if event.type() == QEvent.GraphicsSceneMouseMove:
+            delta = event.pos() - event.lastPos()
+            self.chart.scroll(-delta.x(), delta.y())
+            return True
+
+        return False
 
 
 class AmzProductLinksWidget(ProwlerTableWidget):
@@ -488,7 +594,11 @@ class AmzPricingWidget(ProwlerTableWidget):
         data = topleft.data(Qt.DisplayRole)
         column = topleft.column()
 
-        price = self.dbsession.query(AmzPriceAndFees).filter_by(id=self.selected_ids[-1]).first()
+        # Locate the price point by id - it's possible for the row to be deselected before editing is finished
+        id_idx = self.model.index(topleft.row(), self.model.fieldIndex('id'))
+        price_id = self.model.data(id_idx)
+
+        price = self.dbsession.query(AmzPriceAndFees).filter_by(id=price_id).first()
 
         if column == self.model.fieldIndex('Price'):
             price.price = data
@@ -582,11 +692,15 @@ class AmazonView(BaseSourceView):
         self.action_set_watch = QAction(QIcon('icons/watch.png'), 'Set watch...', self)
         self.action_set_watch.triggered.connect(self.on_set_watch)
 
+        self.action_update_listing = QAction(QIcon('icons/reload.png'), 'Update listing(s)', self)
+        self.action_update_listing.triggered.connect(self.on_update_listing)
+
         # Add context actions to the child widgets
         self.source_view.double_clicked.connect(self.action_open_in_browser.trigger)
         self.source_view.add_context_actions([self.action_add_to_list,
                                               self.action_remove_from_list,
                                               self.action_set_watch,
+                                              self.action_update_listing,
                                               self.action_open_in_browser,
                                               self.action_open_camel3,
                                               self.action_open_in_google,
@@ -762,6 +876,22 @@ class AmazonView(BaseSourceView):
             dbhelpers.set_watch(self.dbsession, listing_id, time)
 
         self.dbsession.commit()
+
+    def on_update_listing(self):
+        """Create UpdateAmazonListing operations for all selected listings."""
+        listing_id = None
+
+        for listing_id in self.source_view.selected_ids:
+            op = Operation.UpdateAmazonListing(listing_id=listing_id, priority=10)
+            self.dbsession.add(op)
+            OperationsManager.get_instance().register_callback(op, self.update_listing_callback)
+
+        if listing_id:
+            self.dbsession.commit()
+
+    def update_listing_callback(self, op):
+        """Update the views."""
+        self.reload()
 
 
 

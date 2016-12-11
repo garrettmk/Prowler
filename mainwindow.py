@@ -28,7 +28,7 @@ class MainWindow(QMainWindow):
 
         self.current_tab = None
 
-        # Set up the database connections. One for SQLAlchemy, one for Qt
+        # Set up the database connection.
         self.dbengine = create_engine('sqlite:///prowler.db')
         self.dbsession = Session(bind=self.dbengine)
 
@@ -37,13 +37,6 @@ class MainWindow(QMainWindow):
         amazon = Vendor(id=0, name='Amazon', url='www.amazon.com')
         self.dbsession.add(self.dbsession.merge(amazon))
         self.dbsession.commit()
-
-        # The Qt connection is only ever used for displaying query results in tables. Opening it as read-only may
-        # help limit conflicts between Qt and SQLAlchemy
-        db = QSqlDatabase.addDatabase('QSQLITE')
-        db.setConnectOptions('QSQLITE_OPEN_READONLY')
-        db.setDatabaseName('prowler.db')
-        db.open()
 
     def setup_ui(self):
         """Initialize the main window's UI components"""

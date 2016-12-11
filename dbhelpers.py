@@ -1,3 +1,4 @@
+import datetime
 from database import *
 
 
@@ -98,3 +99,83 @@ def get_or_create_category(session, productcategory_id, product_group):
         category = session.query(AmazonCategory).filter(AmazonCategory.product_groups.contains(product_group)).first()
 
     return category or get_or_create(session, AmazonCategory, name='Unknown')
+
+
+class ProductHistoryStats:
+    """A helper class for working with Amazon product history data."""
+
+    _sale_slope = -0.3
+
+    def __init__(self, session, amz_listing_id):
+        """Initialize the object."""
+
+        self._session = session
+        self._listing_id = amz_listing_id
+
+    def data_points(self):
+        """Return historical data in a list of named tuples."""
+        return self._session.query(AmzProductHistory.timestamp,
+                                   AmzProductHistory.salesrank,
+                                   AmzProductHistory.hasprime,
+                                   AmzProductHistory.merchant_id,
+                                   AmzProductHistory.offers).\
+                             filter_by(amz_listing_id=self._listing_id).\
+                             order_by(AmzProductHistory.timestamp.desc()).\
+                             all()
+
+    def avg_salesrank(self):
+        """Return the listing's average sales rank."""
+        return self._session.query(func.avg(AmzProductHistory.salesrank)).\
+                             filter_by(amz_listing_id=self._listing_id).\
+                             scalar()
+
+    def avg_90day_salesrank(self):
+        """Return the listing's average sales rank over the last 90 days."""
+        start_date = datetime.date.today() - datetime.timedelta(days=90)
+
+        return self._session.query(func.avg(AmzProductHistory.salesrank)).\
+                             filter(AmzProductHistory.amz_listing_id==self._listing_id,
+                                    AmzProductHistory.timestamp > start_date).\
+                             scalar()
+
+    def sales_points(self):
+        """Return the timestamps of data points signifying a sale."""
+        sales = []
+        last_point = None
+
+        for point in self._session.query(AmzProductHistory.timestamp, AmzProductHistory.salesrank).\
+                                   filter_by(amz_listing_id=self._listing_id).\
+                                   order_by(AmzProductHistory.timestamp.\
+                                   asc()):
+
+            if last_point:
+                slope = (point.salesrank - last_point.salesrank) \
+                        / (point.timestamp.timestamp() - last_point.timestamp.timestamp())
+
+                if slope < self._sale_slope:
+                    sales.append(point)
+
+            last_point = point
+
+        return sales
+
+    def is_sale(self, obs):
+        """Return True if the given AmzProductHistory object is believed to show a sale."""
+
+        # Get the observation immediately before this one
+        prior = self._session.query(AmzProductHistory).\
+                              filter(AmzProductHistory.amz_listing_id==obs.amz_listing_id,
+                                     AmzProductHistory.id < obs.id).\
+                              order_by(AmzProductHistory.timestamp.desc()).\
+                              first()
+
+        if prior:
+            # Calculate how much of a drop between prior.salesrank and obs.salesrank
+            try:
+                slope = (obs.salesrank - prior.salesrank) / (obs.timestamp.timestamp() - prior.timestamp.timestamp())
+                return slope < self._sale_slope
+            except ZeroDivisionError:
+                print('Zero division error: obs.id=%s, prior.id=%s' % (obs.id, prior.id))
+                return False
+        else:
+            return False

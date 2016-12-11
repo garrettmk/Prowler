@@ -12,6 +12,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.sql import label
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_method, hybrid_property
+from sqlalchemy.ext.orderinglist import ordering_list
 from sqlalchemy.orm import sessionmaker, scoped_session, relationship, backref
 from sqlalchemy.orm.exc import ObjectDeletedError, NoResultFound
 
@@ -142,11 +143,11 @@ class Listing(Base):
 
     @hybrid_property
     def unit_price(self):
-        return round(self.price / self.quantity, 2)
+        return self.price / self.quantity
 
     @unit_price.expression
     def unit_price(cls):
-        return func.round(cls.price / cls.quantity, 2)
+        return cls.price / cls.quantity
 
 
 class AmazonCategory(Base):
@@ -187,6 +188,8 @@ class AmazonListing(Listing):
     merchant_id = Column(Integer, ForeignKey(AmazonMerchant.id))
     merchant = relationship(AmazonMerchant)
 
+    history = relationship('AmzProductHistory', order_by='AmzProductHistory.timestamp')
+
     __mapper_args__ = {'polymorphic_identity': 'amz_listing'}
 
     def __init__(self, **kwargs):
@@ -202,7 +205,6 @@ class AmzProductHistory(Base):
 
     id = Column(Integer, primary_key=True)
     amz_listing_id = Column(Integer, ForeignKey(AmazonListing.id, ondelete='CASCADE'))
-    amz_listing = relationship(AmazonListing, backref='history')
 
     price = Column(Float)
     salesrank = Column(Integer)

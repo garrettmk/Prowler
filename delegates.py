@@ -153,8 +153,11 @@ class NumericDelegate(QStyledItemDelegate):
         self._readonly = bool(value)
 
     def displayText(self, value, locale):
-        fstr = '{:,.%sf}' % self._precision
-        return fstr.format(value)
+        try:
+            fstr = '{:,.%sf}' % self._precision
+            return fstr.format(float(value))
+        except (ValueError, TypeError):
+            return ''
 
     def createEditor(self, parent, options, index):
         if self.readonly:
@@ -232,6 +235,17 @@ class UTCtoLocalDelegate(QStyledItemDelegate):
         super(UTCtoLocalDelegate, self).__init__(parent=parent)
 
     def displayText(self, value, locale):
-        dt = QDateTime.fromString(value, Qt.ISODate)
-        dt.setTimeSpec(Qt.UTC)
-        return dt.toLocalTime().toString(Qt.TextDate)
+        try:
+            dt = QDateTime.fromString(value, Qt.ISODate)
+            dt.setTimeSpec(Qt.UTC)
+            return dt.toLocalTime().toString(Qt.TextDate)
+        except TypeError:
+            pass
+
+        try:
+            dt = QDateTime.fromTime_t(value.timestamp())
+            dt.setTimeSpec(Qt.UTC)
+            return dt.toLocalTime().toString(Qt.TextDate)
+        except AttributeError:
+            raise ValueError('Expected string or datetime, got %s' % type(value))
+
