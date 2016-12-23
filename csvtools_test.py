@@ -45,13 +45,15 @@ class ReadQuantityTest(unittest.TestCase):
                ('cases of 1 dozen', 12),
                ('cs of 1,000', 1000),
                ('case (12) dozen', 144),
-               #('box 12', 12),
+               ('case of 1/2 dz', 6),
+               ('set of (1/2) doz', 6),
 
                ('sets consist of 12', 12),
                ('box consists of (12)', 12),
                ('boxes consist of 1 dozen', 12),
                ('bags consist of (1) dz', 12),
                ('case consists of 1,000 pieces', 1000),
+               ('set consists of (1,000/2) pcs', 500),
 
                ('12pk', 12),
                ('12 pack', 12),
@@ -59,17 +61,20 @@ class ReadQuantityTest(unittest.TestCase):
                ('12/pack', 12),
                ('12 / set', 12),
                ('12 per carton', 12),
+               ('1/2 doz per set', 6),
 
                ('(12)pk', 12),
                ('(12) pack', 12),
                ('(12)-pack', 12),
                ('(12)/set', 12),
                ('(12) per carton', 12),
+               ('(1,000/2)/box', 500),
 
                ('1dz pack', 12),
                ('1 dozen - pack', 12),
                ('1dz / set', 12),
                ('1 dozen per box', 12),
+               ('1 doz per set', 12),
 
                ('1,000 pk', 1000),
                ('1,000-pack', 1000),
@@ -86,6 +91,7 @@ class ReadQuantityTest(unittest.TestCase):
                ('(1,000) pieces / case', 1000),
                ('1dz bloops per box', 12),
                ('(1) dz pieces/set', 12),
+               ('1/2 doz / set', 6),
 
                ('1dz', 12),
                ('1-dozen', 12),

@@ -267,7 +267,7 @@ class AmzHistoryChart(QWidget):
         last_row = None
         for row in self.dbsession.query(AmzProductHistory).\
                                   filter(AmzProductHistory.amz_listing_id == self.source.id,
-                                         AmzProductHistory.timestamp > start_date.replace(tzinfo=None) - timedelta(days=1),
+                                         AmzProductHistory.timestamp > start_date.replace(tzinfo=None),
                                          AmzProductHistory.timestamp < earliest.replace(tzinfo=None)).\
                                   order_by(AmzProductHistory.timestamp.desc()):
 
@@ -300,7 +300,7 @@ class AmzHistoryChart(QWidget):
         """Respond to a change in the time axis' minimum value."""
         # toTime_t() converts to UTC automatically
         utc_min = datetime.fromtimestamp(min.toTime_t(), timezone.utc)
-        self.load_history_from(start_date=utc_min)
+        self.load_history_from(start_date=utc_min - timedelta(days=1))
 
     def reset_axes(self):
         """Resets the chart axes."""
@@ -363,6 +363,45 @@ class AmzHistoryChart(QWidget):
             return True
 
         return False
+
+
+class AmzHistoryStackWidget(QWidget):
+    """A stack of an AmzHistoryChart and an AmzHistoryTableWidget."""
+
+    def __init__(self, parent=None):
+        """Initialize the widget."""
+        super(AmzHistoryStackWidget, self).__init__(parent=parent)
+
+        layout = QVBoxLayout(self)
+
+        self.chart = AmzHistoryChart()
+        self.table = AmzHistoryTableWidget()
+
+        self.stack = QStackedWidget(self)
+        self.stack.addWidget(self.chart)
+        self.stack.addWidget(self.table)
+
+        layout.addWidget(self.stack)
+        self.setLayout(layout)
+
+        self.action_show_chart = QAction('Show chart')
+        self.action_show_table = QAction('Show table')
+
+        self.action_show_chart.triggered.connect(self.flip)
+        self.action_show_table.triggered.connect(self.flip)
+
+        self.chart.add_context_action(self.action_show_table)
+        self.table.add_context_action(self.action_show_chart)
+
+    def set_source(self, source):
+        """Set the source listing for the history widgets."""
+        self.chart.set_source(source)
+        self.table.set_source(source)
+
+    def flip(self):
+        """Flip to the next page in the stack."""
+        # x = abs(x - 1) produces alternating 1's and 0's
+        self.stack.setCurrentIndex(abs(self.stack.currentIndex() - 1))
 
 
 class AmzProductLinksWidget(ProwlerTableWidget):
@@ -680,12 +719,6 @@ class AmazonView(BaseSourceView):
         self.action_search_amazon.triggered.connect(self.on_search_amazon)
 
         # Create context actions for the child widgets
-        self.action_show_hist_table = QAction('Show table')
-        self.action_show_hist_chart = QAction('Show chart')
-
-        self.action_show_hist_table.triggered.connect(self.on_show_hist_table)
-        self.action_show_hist_chart.triggered.connect(self.on_show_hist_chart)
-
         self.action_open_camel3 = QAction(QIcon('icons/camel.png'), 'Open in CamelCamelCamel...', self)
         self.action_open_camel3.triggered.connect(self.on_open_camel3)
 
@@ -717,14 +750,11 @@ class AmazonView(BaseSourceView):
         self.product_details.openUPCLookupBtn.clicked.connect(self.action_lookup_upc.trigger)
         self.product_details.openCamelBtn.clicked.connect(self.action_open_camel3.trigger)
 
-        self.history_table.add_context_action(self.action_show_hist_chart)
-        self.history_chart.add_context_action(self.action_show_hist_table)
-
         # Connect to selection change on the product links widget
         self.product_links.selection_changed.connect(self.on_link_selection_changed)
 
         # Populate and go
-        self.on_show_hist_chart()
+        # self.on_show_hist_chart()
         self.populate_source_box()
         self.reload()
 
@@ -763,13 +793,7 @@ class AmazonView(BaseSourceView):
         details_layout.addWidget(line)
 
         # Product history stack
-        self.history_table = AmzHistoryTableWidget(self)
-        self.history_chart = AmzHistoryChart(self)
-
-        self.history_stack = QStackedWidget(self)
-        self.history_stack.addWidget(self.history_table)
-        self.history_stack.addWidget(self.history_chart)
-
+        self.history_stack = AmzHistoryStackWidget(self)
         details_layout.addWidget(self.history_stack)
 
         # Add the tab
@@ -809,8 +833,7 @@ class AmazonView(BaseSourceView):
 
         selection = self.dbsession.query(AmazonListing).filter_by(id=self.get_selected_id()).first()
 
-        self.history_table.set_source(selection)
-        self.history_chart.set_source(selection)
+        self.history_stack.set_source(selection)
         self.product_pricing.set_source(selection)
 
         # Select the first linked vendor by default
@@ -820,14 +843,6 @@ class AmazonView(BaseSourceView):
         """Update the pricing widget when a vendor source is selected."""
         selection = self.dbsession.query(VendorListing).filter_by(id=self.product_links.get_selected_id()).first()
         self.product_pricing.set_vnd_source(selection)
-
-    def on_show_hist_table(self):
-        """Show the product history table."""
-        self.history_stack.setCurrentWidget(self.history_table)
-
-    def on_show_hist_chart(self):
-        """Show the product history chart."""
-        self.history_stack.setCurrentWidget(self.history_chart)
 
     def on_search_amazon(self):
         """Create a SearchAmazon operation."""

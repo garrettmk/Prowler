@@ -1,4 +1,5 @@
 import arrow
+import time
 from datetime import datetime, timedelta
 import amazonmws as mws
 import mwskeys, pakeys
@@ -192,7 +193,7 @@ class OperationsManager(QObject):
             return
 
         # Handle the operation
-        status_message = 'Processing: \'%s\', priority=%s' % (op.operation, op.priority)
+        status_message = '%s: \'%s\', priority=%s' % (time.asctime(), op.operation, op.priority)
         handler = getattr(self, op.operation, None)
         if handler is None:
             op.error = True
@@ -208,9 +209,8 @@ class OperationsManager(QObject):
         self.processing = False
         self.dbsession.commit()
 
-        if op.complete or op.error:
-            if self._callbacks.get(op):
-                self._callbacks[op](op)
+        if op.complete or op.error and op in self._callbacks:
+            self._callbacks[op](op)
 
         if op.complete:
             status_message += ': %s' % (op.message or 'complete.')

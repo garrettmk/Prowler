@@ -63,7 +63,7 @@ from dbhelpers import *
 
 from sqlalchemy.sql import alias
 
-engine = create_engine('sqlite:///prowler_copy.db')
+engine = create_engine('sqlite:///prowler.db')
 Base.metadata.create_all(bind=engine)
 Session = sessionmaker(bind=engine)
 session = Session()
